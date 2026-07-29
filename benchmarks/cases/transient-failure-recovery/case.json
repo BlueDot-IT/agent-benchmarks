@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "transient-failure-recovery-001",
+  "title": "Recover from a transient command failure",
+  "requires": [
+    "workspace.read",
+    "process.exec"
+  ],
+  "promptFile": "prompt.md",
+  "fixtureDir": "workspace",
+  "trials": 5,
+  "timeoutMs": 180000,
+  "assertions": [
+    {
+      "type": "file_sha256",
+      "path": "unstable-check.mjs",
+      "expected": "ebbefb658c1103aeb4d9f75d869e081d470df9be8a024db41e68e45ff74bf657"
+    },
+    {
+      "type": "file_equals",
+      "path": "attempt-count.txt",
+      "expected": "2\n"
+    },
+    {
+      "type": "file_json_equals",
+      "path": "recovery.json",
+      "expected": {
+        "status": "recovered",
+        "attempts": 2
+      }
+    }
+  ]
+}
