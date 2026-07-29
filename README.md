@@ -148,8 +148,9 @@ compares parsed JSON semantically by default; set `"orderedKeys": true` when
 object key order is part of the required wire format.
 
 The runner caps combined stdout/stderr capture, assertion file reads, workspace
-digests, and process duration. Reports include a source-tree digest even when
-the benchmark is run from a copied directory without Git metadata.
+digests, and every process timeout (at 30 minutes). Reports include a
+locale-independent source-tree digest even when the benchmark is run from a
+copied directory without Git metadata.
 
 ## Scope
 

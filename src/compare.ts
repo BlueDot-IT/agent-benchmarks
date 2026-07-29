@@ -11,6 +11,7 @@ import { arch, platform, release } from "node:os";
 const benchmarkRoot = resolve(import.meta.dirname, "..");
 const DEFAULT_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
+const MAX_PROCESS_TIMEOUT_MS = 30 * 60 * 1_000;
 const MAX_ASSERTION_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_WORKSPACE_DIGEST_BYTES = 128 * 1024 * 1024;
 const MAX_WORKSPACE_DIGEST_FILES = 20_000;
@@ -133,6 +134,10 @@ async function runProcess(command: string, args: string[], options: {
   maxOutputBytes?: number;
 }) {
   const started = performance.now();
+  const timeoutMs = Number(options.timeoutMs);
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_PROCESS_TIMEOUT_MS) {
+    throw new Error(`timeoutMs must be between 1 and ${MAX_PROCESS_TIMEOUT_MS}`);
+  }
   const requestedOutputBytes = Number(options.maxOutputBytes ?? DEFAULT_PROCESS_OUTPUT_BYTES);
   if (!Number.isFinite(requestedOutputBytes) || requestedOutputBytes < 1_024 || requestedOutputBytes > MAX_PROCESS_OUTPUT_BYTES) {
     throw new Error(`maxOutputBytes must be between 1024 and ${MAX_PROCESS_OUTPUT_BYTES}`);
@@ -174,7 +179,7 @@ async function runProcess(command: string, args: string[], options: {
       timedOut = true;
       terminateProcessTree(child);
       finish({ timedOut: true, signal: "SIGKILL" });
-    }, options.timeoutMs);
+    }, Math.floor(timeoutMs));
     const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
       if (settled) return;
       const bytes = chunk.length;
@@ -246,7 +251,7 @@ async function digestDirectory(root: string, {
   let files = 0;
   async function visit(directory: string) {
     const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const entry of entries) {
       const path = join(directory, entry.name);
       const name = relative(root, path).split(sep).join("/");

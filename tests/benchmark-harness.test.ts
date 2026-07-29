@@ -72,7 +72,7 @@ test("cross-agent benchmark runner grades output, workspace changes, and capabil
     assert.ok(report.benchmarkCommit === null || /^[0-9a-f]{40}$/u.test(report.benchmarkCommit));
     assert.match(report.benchmarkSourceDigest, /^[0-9a-f]{64}$/u);
     assert.match(report.runFingerprint, /^[0-9a-f]{64}$/u);
-    assert.equal(typeof report.benchmarkTreeDirty, "boolean");
+    assert.ok(report.benchmarkTreeDirty === null || typeof report.benchmarkTreeDirty === "boolean");
     assert.match(report.cases[0].manifestDigest, /^[0-9a-f]{64}$/u);
     assert.match(report.cases[0].promptDigest, /^[0-9a-f]{64}$/u);
     const jsonl = (await readdir(output)).find((name) => name.endsWith(".jsonl"));
@@ -226,6 +226,34 @@ test("process output is bounded and an overflow cannot verify", async () => {
     assert.equal(report.results[0].status, "failed");
     assert.equal(report.results[0].outputLimitExceeded, true);
     assert.ok(Buffer.byteLength(report.results[0].output) <= 1024);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("process duration rejects unbounded timeout requests", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-timeout-limit-"));
+  const config = join(root, "adapters.json");
+  const suite = await writeSuite(root, [{
+    id: "timeout-limit",
+    timeoutMs: 31 * 60 * 1_000,
+    assertions: [{ type: "stdout_equals", expected: "OK" }]
+  }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('OK')"]
+    }]
+  }, null, 2)}\n`);
+  try {
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", join(root, "reports")]),
+      /timeoutMs must be between 1 and 1800000/u
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
