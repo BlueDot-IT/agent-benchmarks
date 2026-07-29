@@ -11,7 +11,8 @@
   "assertions": [
     {
       "type": "stdout_equals",
-      "expected": "BENCHMARK_OK"
+      "expected": "BENCHMARK_OK",
+      "trim": true
     }
   ]
 }

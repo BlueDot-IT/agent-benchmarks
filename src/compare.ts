@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { appendFile, cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -8,6 +9,11 @@ import process from "node:process";
 import { arch, platform, release } from "node:os";
 
 const benchmarkRoot = resolve(import.meta.dirname, "..");
+const DEFAULT_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
+const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
+const MAX_ASSERTION_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_WORKSPACE_DIGEST_BYTES = 128 * 1024 * 1024;
+const MAX_WORKSPACE_DIGEST_FILES = 20_000;
 
 function option(args: string[], name: string, fallback = "") {
   const index = args.indexOf(name);
@@ -34,6 +40,52 @@ function assertContained(root: string, candidate: string, label: string) {
     throw new Error(`${label} escapes its allowed root: ${candidate}`);
   }
   return candidate;
+}
+
+function isMissingError(error: unknown): error is NodeJS.ErrnoException {
+  return (error as NodeJS.ErrnoException)?.code === "ENOENT";
+}
+
+async function resolveExistingContained(root: string, candidate: string, label: string) {
+  const realRoot = await realpath(root);
+  const lexical = assertContained(realRoot, resolve(realRoot, candidate), label);
+  const target = await realpath(lexical);
+  return assertContained(realRoot, target, label);
+}
+
+async function containedPathState(root: string, candidate: string, label: string) {
+  const realRoot = await realpath(root);
+  const lexical = assertContained(realRoot, resolve(realRoot, candidate), label);
+  try {
+    await lstat(lexical);
+  } catch (error) {
+    if (!isMissingError(error)) throw error;
+    let ancestor = dirname(lexical);
+    while (true) {
+      try {
+        const realAncestor = await realpath(ancestor);
+        assertContained(realRoot, realAncestor, label);
+        return { exists: false, path: lexical };
+      } catch (ancestorError) {
+        if (!isMissingError(ancestorError)) throw ancestorError;
+        const next = dirname(ancestor);
+        if (next === ancestor) throw ancestorError;
+        ancestor = next;
+      }
+    }
+  }
+  return { exists: true, path: await resolveExistingContained(realRoot, lexical, label) };
+}
+
+async function readContainedFile(root: string, candidate: string, label: string) {
+  const state = await containedPathState(root, candidate, label);
+  if (!state.exists) return null;
+  const metadata = await lstat(state.path);
+  if (!metadata.isFile()) throw new Error(`${label} is not a regular file: ${candidate}`);
+  if (metadata.size > MAX_ASSERTION_FILE_BYTES) {
+    throw new Error(`${label} exceeds ${MAX_ASSERTION_FILE_BYTES} bytes: ${candidate}`);
+  }
+  return readFile(state.path);
 }
 
 async function readJson(path: string) {
@@ -78,8 +130,14 @@ async function runProcess(command: string, args: string[], options: {
   env?: Record<string, string>;
   stdin?: string;
   timeoutMs: number;
+  maxOutputBytes?: number;
 }) {
   const started = performance.now();
+  const requestedOutputBytes = Number(options.maxOutputBytes ?? DEFAULT_PROCESS_OUTPUT_BYTES);
+  if (!Number.isFinite(requestedOutputBytes) || requestedOutputBytes < 1_024 || requestedOutputBytes > MAX_PROCESS_OUTPUT_BYTES) {
+    throw new Error(`maxOutputBytes must be between 1024 and ${MAX_PROCESS_OUTPUT_BYTES}`);
+  }
+  const maxOutputBytes = Math.floor(requestedOutputBytes);
   return new Promise<any>((resolvePromise) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -88,9 +146,15 @@ async function runProcess(command: string, args: string[], options: {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"]
     });
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let timedOut = false;
+    let outputLimitExceeded = false;
+    let capturedBytes = 0;
+    const captured = () => ({
+      stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+      stderr: Buffer.concat(stderrChunks).toString("utf8")
+    });
     let settled = false;
     const finish = (result: any) => {
       if (settled) return;
@@ -99,9 +163,9 @@ async function runProcess(command: string, args: string[], options: {
       resolvePromise({
         exitCode: null,
         signal: null,
-        stdout: "",
-        stderr: "",
+        ...captured(),
         timedOut,
+        outputLimitExceeded,
         durationMs: performance.now() - started,
         ...result
       });
@@ -109,16 +173,30 @@ async function runProcess(command: string, args: string[], options: {
     const timer = setTimeout(() => {
       timedOut = true;
       terminateProcessTree(child);
-      finish({ stdout, stderr, timedOut: true, signal: "SIGKILL" });
+      finish({ timedOut: true, signal: "SIGKILL" });
     }, options.timeoutMs);
-    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      if (settled) return;
+      const bytes = chunk.length;
+      const remaining = Math.max(0, maxOutputBytes - capturedBytes);
+      const kept = remaining >= bytes ? chunk : chunk.subarray(0, remaining);
+      if (stream === "stdout") stdoutChunks.push(kept);
+      else stderrChunks.push(kept);
+      capturedBytes += Math.min(bytes, remaining);
+      if (bytes > remaining) {
+        outputLimitExceeded = true;
+        terminateProcessTree(child);
+        finish({ outputLimitExceeded: true, signal: "SIGKILL" });
+      }
+    };
+    child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk));
     child.on("error", (error) => {
-      finish({ stdout, stderr, error: error.message });
+      finish({ error: error.message });
     });
     child.on("close", (exitCode, signal) => {
       terminateProcessTree(child);
-      finish({ exitCode, signal, stdout, stderr });
+      finish({ exitCode, signal });
     });
     if (options.stdin !== undefined) child.stdin.end(options.stdin);
     else child.stdin.end();
@@ -141,30 +219,58 @@ function minimalProcessEnvironment(): NodeJS.ProcessEnv {
 
 function normalizeOutput(processResult: any, adapter: any) {
   const format = adapter.output?.format ?? "text";
-  if (format === "text") return { text: processResult.stdout.trim(), metrics: {} };
+  if (format === "text") return { text: processResult.stdout, metrics: {} };
   if (format !== "json") throw new Error(`unsupported output format ${format}`);
   const parsed = JSON.parse(processResult.stdout);
   const extracted = adapter.output?.path ? extractJsonPath(parsed, adapter.output.path) : parsed;
   if (extracted === undefined) throw new Error(`adapter output path not found: ${adapter.output?.path ?? "(root)"}`);
   const metrics = Object.fromEntries(Object.entries(adapter.output?.metrics ?? {}).map(([name, path]) => [name, extractJsonPath(parsed, String(path)) ?? null]));
   return {
-    text: typeof extracted === "string" ? extracted.trim() : JSON.stringify(extracted),
+    text: typeof extracted === "string" ? extracted : JSON.stringify(extracted),
     metrics
   };
 }
 
-async function digestDirectory(root: string) {
+async function digestDirectory(root: string, {
+  excluded = new Set<string>(),
+  maxBytes = MAX_WORKSPACE_DIGEST_BYTES,
+  maxFiles = MAX_WORKSPACE_DIGEST_FILES
+}: {
+  excluded?: Set<string>;
+  maxBytes?: number;
+  maxFiles?: number;
+} = {}) {
   const { readdir } = await import("node:fs/promises");
   const hash = createHash("sha256");
+  let bytes = 0;
+  let files = 0;
   async function visit(directory: string) {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       const path = join(directory, entry.name);
       const name = relative(root, path).split(sep).join("/");
-      hash.update(`${entry.isDirectory() ? "d" : "f"}:${name}\0`);
-      if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile()) hash.update(await readFile(path));
+      if (excluded.has(name) || Array.from(excluded).some((prefix) => name.startsWith(`${prefix}/`))) continue;
+      files += 1;
+      if (files > maxFiles) throw new Error(`workspace digest exceeds ${maxFiles} entries`);
+      if (entry.isDirectory()) {
+        hash.update(`d:${name}\0`);
+        await visit(path);
+      } else if (entry.isSymbolicLink()) {
+        const target = await readlink(path);
+        bytes += Buffer.byteLength(target);
+        if (bytes > maxBytes) throw new Error(`workspace digest exceeds ${maxBytes} bytes`);
+        hash.update(`l:${name}\0${target}\0`);
+      } else if (entry.isFile()) {
+        hash.update(`f:${name}\0`);
+        for await (const chunk of createReadStream(path)) {
+          bytes += chunk.length;
+          if (bytes > maxBytes) throw new Error(`workspace digest exceeds ${maxBytes} bytes`);
+          hash.update(chunk);
+        }
+      } else {
+        throw new Error(`workspace digest does not support special entry ${name}`);
+      }
     }
   }
   await visit(root);
@@ -173,8 +279,8 @@ async function digestDirectory(root: string) {
 
 async function gradeAssertion(assertion: any, context: any) {
   if (assertion.type === "stdout_equals") {
-    const actual = assertion.trim === false ? context.output : context.output.trim();
-    const expected = assertion.trim === false ? String(assertion.expected) : String(assertion.expected).trim();
+    const actual = assertion.trim === true ? context.output.trim() : context.output;
+    const expected = assertion.trim === true ? String(assertion.expected).trim() : String(assertion.expected);
     return { passed: actual === expected, type: assertion.type, expected, actual };
   }
   if (assertion.type === "stdout_contains") {
@@ -185,41 +291,38 @@ async function gradeAssertion(assertion: any, context: any) {
     let actual = null;
     try { actual = JSON.parse(context.output); } catch {}
     const expected = assertion.expected;
+    const actualComparable = assertion.orderedKeys === true ? JSON.stringify(actual) : stableJsonValue(actual);
+    const expectedComparable = assertion.orderedKeys === true ? JSON.stringify(expected) : stableJsonValue(expected);
     return {
-      passed: actual !== null && stableJsonValue(actual) === stableJsonValue(expected),
+      passed: actual !== null && actualComparable === expectedComparable,
       type: assertion.type,
       expected,
-      actual
+      actual,
+      orderedKeys: assertion.orderedKeys === true
     };
   }
   if (assertion.type === "file_exists") {
-    const path = assertContained(context.workspace, resolve(context.workspace, assertion.path), "assertion path");
-    try {
-      await stat(path);
-      return { passed: true, type: assertion.type, path: assertion.path };
-    } catch {
-      return { passed: false, type: assertion.type, path: assertion.path };
-    }
+    const state = await containedPathState(context.workspace, assertion.path, "assertion path");
+    return { passed: state.exists, type: assertion.type, path: assertion.path };
   }
   if (assertion.type === "file_absent") {
-    const path = assertContained(context.workspace, resolve(context.workspace, assertion.path), "assertion path");
-    try {
-      await stat(path);
-      return { passed: false, type: assertion.type, path: assertion.path };
-    } catch {
-      return { passed: true, type: assertion.type, path: assertion.path };
-    }
+    const state = await containedPathState(context.workspace, assertion.path, "assertion path");
+    return { passed: !state.exists, type: assertion.type, path: assertion.path };
   }
   if (assertion.type === "file_equals") {
-    const path = assertContained(context.workspace, resolve(context.workspace, assertion.path), "assertion path");
-    const actual = await readFile(path, "utf8").catch(() => null);
+    const content = await readContainedFile(context.workspace, assertion.path, "assertion path");
+    const actual = content?.toString("utf8") ?? null;
     const expected = String(assertion.expected);
     return { passed: actual === expected, type: assertion.type, path: assertion.path, expected, actual };
   }
   if (assertion.type === "file_json_equals") {
-    const path = assertContained(context.workspace, resolve(context.workspace, assertion.path), "assertion path");
+    const content = await readContainedFile(context.workspace, assertion.path, "assertion path");
     let actual = null;
-    try { actual = JSON.parse(await readFile(path, "utf8")); } catch {}
+    if (content) {
+      try { actual = JSON.parse(content.toString("utf8")); } catch (error) {
+        if ((error as SyntaxError)?.name !== "SyntaxError") throw error;
+      }
+    }
     const expected = assertion.expected;
     return {
       passed: actual !== null && stableJsonValue(actual) === stableJsonValue(expected),
@@ -230,13 +333,12 @@ async function gradeAssertion(assertion: any, context: any) {
     };
   }
   if (assertion.type === "file_contains") {
-    const path = assertContained(context.workspace, resolve(context.workspace, assertion.path), "assertion path");
-    const content = await readFile(path, "utf8").catch(() => "");
-    return { passed: content.includes(String(assertion.expected)), type: assertion.type, path: assertion.path, expected: assertion.expected };
+    const content = await readContainedFile(context.workspace, assertion.path, "assertion path");
+    const text = content?.toString("utf8") ?? "";
+    return { passed: text.includes(String(assertion.expected)), type: assertion.type, path: assertion.path, expected: assertion.expected };
   }
   if (assertion.type === "file_sha256") {
-    const path = assertContained(context.workspace, resolve(context.workspace, assertion.path), "assertion path");
-    const content = await readFile(path).catch(() => null);
+    const content = await readContainedFile(context.workspace, assertion.path, "assertion path");
     const actual = content ? createHash("sha256").update(content).digest("hex") : null;
     const expected = String(assertion.expected).toLowerCase();
     return { passed: actual === expected, type: assertion.type, path: assertion.path, expected, actual };
@@ -245,17 +347,19 @@ async function gradeAssertion(assertion: any, context: any) {
     if (!assertion.command || !Array.isArray(assertion.args ?? [])) throw new Error("command assertion requires command and args");
     const result = await runProcess(assertion.command, assertion.args ?? [], {
       cwd: context.workspace,
-      timeoutMs: Number(assertion.timeoutMs) || 30_000
+      timeoutMs: Number(assertion.timeoutMs) || 30_000,
+      maxOutputBytes: Number(assertion.maxOutputBytes) || DEFAULT_PROCESS_OUTPUT_BYTES
     });
     const expectedExitCode = Number(assertion.exitCode ?? 0);
     return {
-      passed: !result.timedOut && result.exitCode === expectedExitCode,
+      passed: !result.timedOut && !result.outputLimitExceeded && result.exitCode === expectedExitCode,
       type: assertion.type,
       command: assertion.command,
       args: assertion.args ?? [],
       expectedExitCode,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
+      outputLimitExceeded: result.outputLimitExceeded,
       stdout: result.stdout.slice(0, 4_000),
       stderr: result.stderr.slice(0, 4_000)
     };
@@ -269,7 +373,7 @@ async function prepareTrial(adapter: any, benchmarkCase: any, caseDirectory: str
   await mkdir(workspace, { recursive: true });
   await mkdir(state, { recursive: true });
   if (benchmarkCase.fixtureDir) {
-    const fixture = assertContained(caseDirectory, resolve(caseDirectory, benchmarkCase.fixtureDir), "fixture");
+    const fixture = await resolveExistingContained(caseDirectory, benchmarkCase.fixtureDir, "fixture");
     await cp(fixture, workspace, { recursive: true });
   }
   if (adapter.stateFixture) {
@@ -285,7 +389,7 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
   const trialRoot = await mkdtemp(join(tmpdir(), "agent-bench-"));
   try {
     const { workspace, state } = await prepareTrial(adapter, benchmarkCase, caseDirectory, trialRoot);
-    const promptPath = assertContained(caseDirectory, resolve(caseDirectory, benchmarkCase.promptFile), "prompt");
+    const promptPath = await resolveExistingContained(caseDirectory, benchmarkCase.promptFile, "prompt");
     const prompt = await readFile(promptPath, "utf8");
     const inputFile = join(trialRoot, "input.json");
     const caseTimeoutMs = Number(benchmarkCase.timeoutMs ?? adapter.timeoutMs) || 600_000;
@@ -305,7 +409,8 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
       cwd: workspace,
       env,
       stdin: adapter.stdin ? replaceTokens(adapter.stdin, tokens) : undefined,
-      timeoutMs: caseTimeoutMs
+      timeoutMs: caseTimeoutMs,
+      maxOutputBytes: Number(benchmarkCase.maxOutputBytes ?? adapter.maxOutputBytes) || DEFAULT_PROCESS_OUTPUT_BYTES
     });
     let output = "";
     let metrics = {};
@@ -318,13 +423,14 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
       outputError = error.message;
     }
     const assertions = [];
-    if (processResult.exitCode === 0 && !processResult.timedOut && !outputError) {
+    if (processResult.exitCode === 0 && !processResult.timedOut && !processResult.outputLimitExceeded && !outputError) {
       for (const assertion of benchmarkCase.assertions ?? []) {
         assertions.push(await gradeAssertion(assertion, { output, workspace }));
       }
     }
     const verified = processResult.exitCode === 0
       && !processResult.timedOut
+      && !processResult.outputLimitExceeded
       && !outputError
       && assertions.length > 0
       && assertions.every((assertion) => assertion.passed);
@@ -338,6 +444,7 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
       exitCode: processResult.exitCode,
       signal: processResult.signal,
       timedOut: processResult.timedOut,
+      outputLimitExceeded: processResult.outputLimitExceeded,
       processError: processResult.error ?? null,
       outputError: outputError || null,
       output: output.slice(0, 8_000),
@@ -421,12 +528,20 @@ function mean(values: number[]) {
 
 function comparisonWarnings(adapters: any[]) {
   const warnings = [];
-  for (const field of ["provider", "model", "reasoning"]) {
-    const values = adapters.map((adapter) => adapter.metadata?.[field]).filter((value) => typeof value === "string" && value && value !== "configure-me");
+  for (const field of ["provider", "model", "reasoning", "sampling", "toolPolicy"]) {
+    const values = adapters
+      .map((adapter) => adapter.metadata?.[field])
+      .filter((value) => value !== undefined && value !== null && value !== "" && value !== "configure-me");
     if (values.length !== adapters.length) warnings.push(`adapter ${field} metadata is incomplete`);
-    else if (new Set(values).size > 1) warnings.push(`adapter ${field} metadata differs; results are not a runtime-only comparison`);
+    else if (new Set(values.map(stableJsonValue)).size > 1) warnings.push(`adapter ${field} metadata differs; results are not a runtime-only comparison`);
   }
   return warnings;
+}
+
+function validateExecutionPolicy(config: any) {
+  if (config.executionPolicy !== "trusted-local") {
+    throw new Error('executionPolicy must be "trusted-local"; adapters run with the host user\'s filesystem and network access and are not OS-sandboxed');
+  }
 }
 
 function validateModelPolicy(config: any, adapters: any[]) {
@@ -477,10 +592,14 @@ export async function main(args = process.argv.slice(2)) {
   const keepWorkspaces = hasFlag(args, "--keep-workspaces");
   const runUnsupported = hasFlag(args, "--run-unsupported");
   const resumeProgressOption = option(args, "--resume-progress");
-  const config = await readJson(resolveFrom(benchmarkRoot, configPath));
-  const suite = await readJson(suitePath);
+  const resolvedConfigPath = resolveFrom(benchmarkRoot, configPath);
+  const configSource = await readFile(resolvedConfigPath);
+  const suiteSource = await readFile(suitePath);
+  const config = JSON.parse(configSource.toString("utf8"));
+  const suite = JSON.parse(suiteSource.toString("utf8"));
   const adapters = (config.adapters ?? []).filter((adapter: any) => !adapterFilter || adapter.id === adapterFilter);
   if (!adapters.length) throw new Error("no matching adapters configured");
+  validateExecutionPolicy(config);
   validateModelPolicy(config, adapters);
   const cases = [];
   for (const entry of suite.cases ?? []) {
@@ -488,13 +607,42 @@ export async function main(args = process.argv.slice(2)) {
     const benchmarkCase = await readJson(manifestPath);
     cases.push({ ...benchmarkCase, manifestPath });
   }
+  const caseDefinitions = await Promise.all(cases.map(async (item) => ({
+    id: item.id,
+    title: item.title,
+    requires: item.requires ?? [],
+    manifest: relative(benchmarkRoot, item.manifestPath),
+    manifestDigest: createHash("sha256").update(await readFile(item.manifestPath)).digest("hex"),
+    promptDigest: createHash("sha256").update(await readFile(await resolveExistingContained(dirname(item.manifestPath), item.promptFile, "prompt"))).digest("hex"),
+    fixtureDigest: item.fixtureDir ? await digestDirectory(await resolveExistingContained(dirname(item.manifestPath), item.fixtureDir, "fixture")) : null
+  })));
+  const sourceDigestExclusions = new Set([".git", "node_modules", "dist", "benchmarks/state"]);
+  const relativeOutputDirectory = relative(benchmarkRoot, outputDirectory).split(sep).join("/");
+  if (relativeOutputDirectory && relativeOutputDirectory !== ".." && !relativeOutputDirectory.startsWith("../") && !isAbsolute(relativeOutputDirectory)) {
+    sourceDigestExclusions.add(relativeOutputDirectory);
+  }
+  const benchmarkSourceDigest = await digestDirectory(benchmarkRoot, { excluded: sourceDigestExclusions });
+  const runFingerprint = createHash("sha256").update(stableJsonValue({
+    configDigest: createHash("sha256").update(configSource).digest("hex"),
+    suiteDigest: createHash("sha256").update(suiteSource).digest("hex"),
+    benchmarkSourceDigest,
+    caseDefinitions,
+    selectedAdapters: adapters.map((adapter: any) => adapter.id),
+    adapterFilter: adapterFilter || null,
+    trialsOverride,
+    runUnsupported
+  })).digest("hex");
+  const selectedAdapterIds = new Set<string>(adapters.map((adapter: any) => String(adapter.id)));
+  const selectedCaseIds = new Set<string>(cases.map((benchmarkCase) => String(benchmarkCase.id)));
   await mkdir(outputDirectory, { recursive: true });
   const runStartedAt = new Date().toISOString();
   const reportStem = `${suite.id}-${Date.now()}`;
   const progressPath = resumeProgressOption
     ? resolveFrom(benchmarkRoot, resumeProgressOption)
     : join(outputDirectory, `${reportStem}.progress.ndjson`);
-  const results = resumeProgressOption ? await readProgress(progressPath, suite.id) : [];
+  const results = resumeProgressOption
+    ? await readProgress(progressPath, suite.id, runFingerprint, selectedAdapterIds, selectedCaseIds)
+    : [];
   if (!resumeProgressOption) await writeFile(progressPath, "");
   for (const benchmarkCase of cases) {
     const caseDirectory = dirname(benchmarkCase.manifestPath);
@@ -514,24 +662,26 @@ export async function main(args = process.argv.slice(2)) {
             missingCapabilities: missing
           };
           results.push(result);
-          await appendFile(progressPath, `${JSON.stringify({ recordedAt: new Date().toISOString(), suite: suite.id, result })}\n`);
+          await appendFile(progressPath, `${JSON.stringify({ recordedAt: new Date().toISOString(), suite: suite.id, runFingerprint, result })}\n`);
         }
         continue;
       }
       for (let index = completedTrials; index < trials; index += 1) {
         const result = await runTrial(adapter, benchmarkCase, caseDirectory, index, keepWorkspaces);
         results.push(result);
-        await appendFile(progressPath, `${JSON.stringify({ recordedAt: new Date().toISOString(), suite: suite.id, result })}\n`);
+        await appendFile(progressPath, `${JSON.stringify({ recordedAt: new Date().toISOString(), suite: suite.id, runFingerprint, result })}\n`);
         console.error(`[bench] ${benchmarkCase.id} · ${adapter.id} · trial ${index + 1}/${trials} · ${result.status} · ${Math.round(result.durationMs)} ms`);
       }
     }
   }
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runStartedAt,
     generatedAt: new Date().toISOString(),
     benchmarkCommit: await gitCommit(benchmarkRoot),
     benchmarkTreeDirty: await gitDirty(benchmarkRoot),
+    benchmarkSourceDigest,
+    runFingerprint,
     suiteCommit: await gitCommit(dirname(suitePath)),
     environment: {
       platform: platform(),
@@ -545,18 +695,18 @@ export async function main(args = process.argv.slice(2)) {
     adapterDefinitions: adapters.map((adapter: any) => ({
       id: adapter.id,
       capabilities: adapter.capabilities ?? [],
-      metadata: adapter.metadata ?? {}
+      metadata: adapter.metadata ?? {},
+      command: adapter.command,
+      args: adapter.args ?? [],
+      envKeys: Object.keys(adapter.env ?? {}).sort(),
+      stdinConfigured: adapter.stdin !== undefined,
+      stateFixture: adapter.stateFixture ?? null,
+      output: adapter.output ?? { format: "text" },
+      timeoutMs: Number(adapter.timeoutMs) || null,
+      maxOutputBytes: Number(adapter.maxOutputBytes) || DEFAULT_PROCESS_OUTPUT_BYTES
     })),
     comparisonWarnings: comparisonWarnings(adapters),
-    cases: await Promise.all(cases.map(async (item) => ({
-      id: item.id,
-      title: item.title,
-      requires: item.requires ?? [],
-      manifest: relative(benchmarkRoot, item.manifestPath),
-      manifestDigest: createHash("sha256").update(await readFile(item.manifestPath)).digest("hex"),
-      promptDigest: createHash("sha256").update(await readFile(resolve(dirname(item.manifestPath), item.promptFile))).digest("hex"),
-      fixtureDigest: item.fixtureDir ? await digestDirectory(resolve(dirname(item.manifestPath), item.fixtureDir)) : null
-    }))),
+    cases: caseDefinitions,
     summary: summarize(results, adapters, cases),
     caseSummary: summarizeCases(results, adapters, cases),
     results
@@ -569,6 +719,8 @@ export async function main(args = process.argv.slice(2)) {
     generatedAt: report.generatedAt,
     benchmarkCommit: report.benchmarkCommit,
     benchmarkTreeDirty: report.benchmarkTreeDirty,
+    benchmarkSourceDigest: report.benchmarkSourceDigest,
+    runFingerprint: report.runFingerprint,
     suiteCommit: report.suiteCommit,
     environment: report.environment,
     suite: report.suite,
@@ -582,7 +734,13 @@ export async function main(args = process.argv.slice(2)) {
   console.log(JSON.stringify({ reportPath, jsonlPath, progressPath, resumedFrom: resumeProgressOption ? basename(progressPath) : null, summary: report.summary, caseSummary: report.caseSummary }, null, 2));
 }
 
-async function readProgress(path: string, suiteId: string) {
+async function readProgress(
+  path: string,
+  suiteId: string,
+  runFingerprint: string,
+  adapterIds: Set<string>,
+  caseIds: Set<string>
+) {
   const content = await readFile(path, "utf8");
   return content.split(/\r?\n/u).filter(Boolean).map((line, index) => {
     let entry;
@@ -590,6 +748,12 @@ async function readProgress(path: string, suiteId: string) {
       throw new Error(`invalid progress journal JSON at line ${index + 1}`);
     }
     if (entry.suite !== suiteId || !entry.result) throw new Error(`progress journal line ${index + 1} does not belong to suite ${suiteId}`);
+    if (entry.runFingerprint !== runFingerprint) {
+      throw new Error(`progress journal fingerprint mismatch at line ${index + 1}; benchmark inputs or configuration changed`);
+    }
+    if (!adapterIds.has(entry.result.adapter) || !caseIds.has(entry.result.caseId)) {
+      throw new Error(`progress journal line ${index + 1} is outside the selected adapter/case matrix`);
+    }
     return entry.result;
   });
 }
