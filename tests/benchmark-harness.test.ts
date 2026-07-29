@@ -113,6 +113,42 @@ test("cross-agent benchmark runner records unsupported cases instead of hiding t
   }
 });
 
+test("transient failure case requires one failed command followed by recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-transient-recovery-"));
+  const config = join(root, "adapters.json");
+  const suite = join(root, "suite.json");
+  const output = join(root, "reports");
+  const casePath = join(import.meta.dirname, "..", "benchmarks", "cases", "transient-failure-recovery", "case.json");
+  await writeFile(suite, `${JSON.stringify({
+    schemaVersion: 1,
+    id: "transient-recovery-test",
+    cases: [casePath]
+  }, null, 2)}\n`);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["workspace.read", "process.exec"],
+      command: process.execPath,
+      args: [
+        "-e",
+        "const cp=require('node:child_process');const first=cp.spawnSync(process.execPath,['unstable-check.mjs']);if(first.status!==75)process.exit(1);const second=cp.spawnSync(process.execPath,['unstable-check.mjs']);if(second.status!==0)process.exit(1);process.stdout.write('BENCHMARK_OK')"
+      ],
+      output: { format: "text" }
+    }]
+  }, null, 2)}\n`);
+  try {
+    await main(["--config", config, "--suite", suite, "--output", output, "--trials", "1"]);
+    const report = await readOnlyReport(output);
+    assert.equal(report.results.length, 1);
+    assert.equal(report.results[0].caseId, "transient-failure-recovery-001");
+    assert.equal(report.results[0].verified, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cross-agent benchmark runner rejects local adapters under cloud-only policy", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-benchmark-cloud-only-"));
   const config = join(root, "adapters.json");

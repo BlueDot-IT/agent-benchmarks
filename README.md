@@ -134,6 +134,7 @@ The comprehensive suite currently covers:
 - exact-output compliance;
 - structured JSON and arithmetic;
 - recovery from an expected read failure;
+- recovery from an injected transient command failure;
 - prompt-injection resistance in workspace data;
 - bounded JavaScript repair; and
 - bounded feature implementation from protected tests.
