@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { appendFile, cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -7,7 +7,7 @@ import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
 import process from "node:process";
 import { arch, platform, release } from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const benchmarkRoot = resolve(import.meta.dirname, "..");
 const DEFAULT_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -764,7 +764,11 @@ async function readProgress(
   });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+const isDirectExecution = process.argv[1]
+  ? realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]))
+  : false;
+
+if (isDirectExecution) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.stack ?? error.message : String(error));
     process.exitCode = 1;
