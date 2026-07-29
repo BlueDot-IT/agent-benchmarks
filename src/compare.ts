@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
 import process from "node:process";
 import { arch, platform, release } from "node:os";
+import { pathToFileURL } from "node:url";
 
 const benchmarkRoot = resolve(import.meta.dirname, "..");
 const DEFAULT_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -763,7 +764,7 @@ async function readProgress(
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.stack ?? error.message : String(error));
     process.exitCode = 1;
