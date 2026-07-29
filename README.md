@@ -38,6 +38,21 @@ Copy `benchmarks/adapters.example.json` to the ignored
 `benchmarks/adapters.json`. For a maintained cloud comparison, start from
 `benchmarks/adapters.cloud.example.json`.
 
+Every configuration must explicitly set:
+
+```json
+{
+  "executionPolicy": "trusted-local"
+}
+```
+
+This is an acknowledgement, not a sandbox. Adapter processes run as the
+current host user and may have that user's filesystem and network access.
+Disposable workspaces, reduced environment inheritance, argument-array
+execution, timeouts, and output limits improve repeatability; they do not make
+an untrusted runtime safe. Run only trusted, locally installed adapters, or put
+the entire harness inside an OS/container sandbox you control.
+
 Adapter commands may use these placeholders:
 
 - `{repo}` — this benchmark repository
@@ -79,6 +94,9 @@ If model metadata is missing or differs, the report records a warning. Such a
 run may still be useful, but it is a runtime-plus-model comparison rather than
 a runtime-only comparison.
 
+For reproducible comparisons, declare `metadata.sampling` and
+`metadata.toolPolicy` as well. Reports warn when either differs or is missing.
+
 ## Run
 
 ```bash
@@ -102,6 +120,10 @@ Reports default to `dist/benchmarks/`:
 - one self-contained trial envelope per JSONL line; and
 - an append-only progress journal suitable for resuming long matrices.
 
+Progress journals are bound to a SHA-256 fingerprint of the selected
+configuration, suite, cases, source tree, and run options. A changed input
+cannot be silently resumed as though it belonged to the original run.
+
 Publish both `verifiedRateExecuted` and `verifiedRateAllTrials`. The former
 excludes declared unsupported trials; the latter keeps them in the denominator.
 
@@ -119,6 +141,16 @@ The comprehensive suite currently covers:
 Supported deterministic assertions include exact or contained stdout, JSON
 equality, file presence or absence, file content and hashes, and bounded
 argument-array commands.
+
+`stdout_equals` is byte-preserving by default; set `"trim": true` only when
+surrounding whitespace is intentionally insignificant. `stdout_json_equals`
+compares parsed JSON semantically by default; set `"orderedKeys": true` when
+object key order is part of the required wire format.
+
+The runner caps combined stdout/stderr capture, assertion file reads, workspace
+digests, and every process timeout (at 30 minutes). Reports include a
+locale-independent source-tree digest even when the benchmark is run from a
+copied directory without Git metadata.
 
 ## Scope
 

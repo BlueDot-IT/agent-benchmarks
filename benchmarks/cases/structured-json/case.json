@@ -21,7 +21,8 @@
           9
         ],
         "checksum": 63
-      }
+      },
+      "orderedKeys": true
     }
   ]
 }
