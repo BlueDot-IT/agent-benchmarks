@@ -111,8 +111,9 @@ Useful options:
 - `--adapter <id>` — run one adapter
 - `--keep-workspaces` — retain disposable workspaces for diagnosis
 - `--run-unsupported` — execute cases despite missing declared capabilities
+- `--strict-comparison` — fail before execution when comparison metadata is incomplete or differs
 - `--output <directory>` — select the report directory
-- `--resume-progress <journal>` — continue an interrupted matrix
+- `--resume-progress <journal>` — continue an interrupted matrix; duplicate trial records are rejected
 
 Reports default to `dist/benchmarks/`:
 
@@ -151,7 +152,13 @@ object key order is part of the required wire format.
 The runner caps combined stdout/stderr capture, assertion file reads, workspace
 digests, and every process timeout (at 30 minutes). Reports include a
 locale-independent source-tree digest even when the benchmark is run from a
-copied directory without Git metadata.
+copied directory without Git metadata. Summary rows include a warning for
+small samples and a Wilson 95% confidence interval for verified rates; a
+single successful trial is not statistically strong evidence.
+
+Input configs and suites use schema version 1 and are validated before any
+adapter process starts. Adapter and case identifiers must be non-empty and
+unique.
 
 ## Scope
 
