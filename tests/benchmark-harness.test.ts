@@ -201,6 +201,50 @@ test("cross-agent benchmark runner requires explicit trusted-local execution pol
   }
 });
 
+test("duplicate adapter ids are rejected before benchmark execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-duplicate-adapter-"));
+  const config = join(root, "adapters.json");
+  const suite = await writeSuite(root, [{ id: "unique-case", assertions: [{ type: "stdout_equals", expected: "OK" }] }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [
+      { id: "duplicate", command: process.execPath, args: ["-e", "process.stdout.write('OK')"] },
+      { id: "duplicate", command: process.execPath, args: ["-e", "process.stdout.write('OK')"] }
+    ]
+  }, null, 2)}\n`);
+  try {
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", join(root, "reports")]),
+      /adapter ids must be unique: duplicate/u
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("duplicate benchmark case ids are rejected before benchmark execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-duplicate-case-"));
+  const config = join(root, "adapters.json");
+  const suite = await writeSuite(root, [
+    { id: "duplicate", assertions: [{ type: "stdout_equals", expected: "OK" }] },
+    { id: "duplicate", assertions: [{ type: "stdout_equals", expected: "OK" }] }
+  ]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{ id: "fixture-agent", command: process.execPath, args: ["-e", "process.stdout.write('OK')"] }]
+  }, null, 2)}\n`);
+  try {
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", join(root, "reports")]),
+      /benchmark case ids must be unique: duplicate/u
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("file_absent rejects a symlink escape instead of treating it as absent", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-benchmark-symlink-"));
   const external = join(root, "external");

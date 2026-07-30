@@ -544,6 +544,19 @@ function comparisonWarnings(adapters: any[]) {
   return warnings;
 }
 
+function validateUniqueIds(items: any[], label: string) {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const item of items) {
+    const id = String(item.id ?? "");
+    if (seen.has(id)) duplicates.add(id);
+    seen.add(id);
+  }
+  if (duplicates.size) {
+    throw new Error(`${label} ids must be unique: ${[...duplicates].sort().join(", ")}`);
+  }
+}
+
 function validateExecutionPolicy(config: any) {
   if (config.executionPolicy !== "trusted-local") {
     throw new Error('executionPolicy must be "trusted-local"; adapters run with the host user\'s filesystem and network access and are not OS-sandboxed');
@@ -605,6 +618,7 @@ export async function main(args = process.argv.slice(2)) {
   const suite = JSON.parse(suiteSource.toString("utf8"));
   const adapters = (config.adapters ?? []).filter((adapter: any) => !adapterFilter || adapter.id === adapterFilter);
   if (!adapters.length) throw new Error("no matching adapters configured");
+  validateUniqueIds(adapters, "adapter");
   validateExecutionPolicy(config);
   validateModelPolicy(config, adapters);
   const cases = [];
@@ -613,6 +627,7 @@ export async function main(args = process.argv.slice(2)) {
     const benchmarkCase = await readJson(manifestPath);
     cases.push({ ...benchmarkCase, manifestPath });
   }
+  validateUniqueIds(cases, "benchmark case");
   const caseDefinitions = await Promise.all(cases.map(async (item) => ({
     id: item.id,
     title: item.title,
