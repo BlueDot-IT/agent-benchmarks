@@ -16,6 +16,7 @@ const MAX_PROCESS_TIMEOUT_MS = 30 * 60 * 1_000;
 const MAX_ASSERTION_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_WORKSPACE_DIGEST_BYTES = 128 * 1024 * 1024;
 const MAX_WORKSPACE_DIGEST_FILES = 20_000;
+const MIN_STATISTICAL_SAMPLE_SIZE = 20;
 
 function option(args: string[], name: string, fallback = "") {
   const index = args.indexOf(name);
@@ -30,7 +31,8 @@ function usage() {
   console.log(`Usage:
   pnpm benchmark -- --config <adapters.json> [--suite benchmarks/suites/smoke.json]
     [--adapter <id>] [--trials <count>] [--output <directory>] [--keep-workspaces]
-    [--run-unsupported] [--resume-progress <run.progress.ndjson>]
+    [--run-unsupported] [--strict-comparison]
+    [--resume-progress <run.progress.ndjson>]
 
 The runner never invokes a shell. Adapter commands and grading commands are
 executed as argument arrays inside disposable case workspaces.`);
@@ -92,6 +94,18 @@ async function readContainedFile(root: string, candidate: string, label: string)
 
 async function readJson(path: string) {
   return JSON.parse(await readFile(path, "utf8"));
+}
+
+function assertObject(value: unknown, label: string): asserts value is Record<string, any> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+}
+
+function assertSchemaVersion(value: any, label: string) {
+  if (value.schemaVersion !== 1) throw new Error(`${label}.schemaVersion must be 1`);
+}
+
+function assertNonEmptyString(value: unknown, label: string) {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
 }
 
 function resolveFrom(base: string, path: string) {
@@ -172,6 +186,7 @@ async function runProcess(command: string, args: string[], options: {
         ...captured(),
         timedOut,
         outputLimitExceeded,
+        capturedBytes,
         durationMs: performance.now() - started,
         ...result
       });
@@ -451,6 +466,7 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
       signal: processResult.signal,
       timedOut: processResult.timedOut,
       outputLimitExceeded: processResult.outputLimitExceeded,
+      capturedBytes: processResult.capturedBytes,
       processError: processResult.error ?? null,
       outputError: outputError || null,
       output: output.slice(0, 8_000),
@@ -495,7 +511,11 @@ function summarize(results: any[], adapters: any[], cases: any[]) {
       meanTotalTokens: mean(totalTokens),
       medianTotalTokens: totalTokens.length ? totalTokens[Math.ceil(totalTokens.length * 0.5) - 1] : null,
       meanCostUsd: mean(costs),
-      medianCostUsd: costs.length ? costs[Math.ceil(costs.length * 0.5) - 1] : null
+      medianCostUsd: costs.length ? costs[Math.ceil(costs.length * 0.5) - 1] : null,
+      statisticalWarning: executed.length > 0 && executed.length < MIN_STATISTICAL_SAMPLE_SIZE
+        ? `sample size ${executed.length} is below ${MIN_STATISTICAL_SAMPLE_SIZE}`
+        : null,
+      verifiedRate95Ci: proportionConfidenceInterval(verified.length, executed.length)
     });
   }
   return rows;
@@ -532,6 +552,19 @@ function mean(values: number[]) {
   return values.length ? Number((values.reduce((total, value) => total + value, 0) / values.length).toFixed(2)) : null;
 }
 
+function proportionConfidenceInterval(successes: number, trials: number) {
+  if (!trials) return null;
+  const z = 1.96;
+  const p = successes / trials;
+  const denominator = 1 + (z ** 2) / trials;
+  const center = (p + (z ** 2) / (2 * trials)) / denominator;
+  const margin = (z * Math.sqrt((p * (1 - p) + (z ** 2) / (4 * trials)) / trials)) / denominator;
+  return {
+    lower: Number(Math.max(0, center - margin).toFixed(4)),
+    upper: Number(Math.min(1, center + margin).toFixed(4))
+  };
+}
+
 function comparisonWarnings(adapters: any[]) {
   const warnings = [];
   for (const field of ["provider", "model", "reasoning", "sampling", "toolPolicy"]) {
@@ -542,6 +575,29 @@ function comparisonWarnings(adapters: any[]) {
     else if (new Set(values.map(stableJsonValue)).size > 1) warnings.push(`adapter ${field} metadata differs; results are not a runtime-only comparison`);
   }
   return warnings;
+}
+
+function validateInputs(config: any, suite: any, adapters: any[], cases: any[]) {
+  assertObject(config, "config");
+  assertObject(suite, "suite");
+  assertSchemaVersion(config, "config");
+  assertSchemaVersion(suite, "suite");
+  if (!Array.isArray(config.adapters)) throw new Error("config.adapters must be an array");
+  if (!Array.isArray(suite.cases) || !suite.cases.length) throw new Error("suite.cases must be a non-empty array");
+  assertNonEmptyString(suite.id, "suite.id");
+  for (const adapter of adapters) {
+    assertObject(adapter, "adapter");
+    assertNonEmptyString(adapter.id, "adapter.id");
+    assertNonEmptyString(adapter.command, `adapter ${adapter.id}.command`);
+    if (adapter.args !== undefined && !Array.isArray(adapter.args)) throw new Error(`adapter ${adapter.id}.args must be an array`);
+    if (adapter.capabilities !== undefined && !Array.isArray(adapter.capabilities)) throw new Error(`adapter ${adapter.id}.capabilities must be an array`);
+  }
+  for (const benchmarkCase of cases) {
+    assertObject(benchmarkCase, "benchmark case");
+    assertNonEmptyString(benchmarkCase.id, "benchmark case.id");
+    assertNonEmptyString(benchmarkCase.promptFile, `benchmark case ${benchmarkCase.id}.promptFile`);
+    if (!Array.isArray(benchmarkCase.assertions)) throw new Error(`benchmark case ${benchmarkCase.id}.assertions must be an array`);
+  }
 }
 
 function validateUniqueIds(items: any[], label: string) {
@@ -610,6 +666,7 @@ export async function main(args = process.argv.slice(2)) {
   const adapterFilter = option(args, "--adapter");
   const keepWorkspaces = hasFlag(args, "--keep-workspaces");
   const runUnsupported = hasFlag(args, "--run-unsupported");
+  const strictComparison = hasFlag(args, "--strict-comparison");
   const resumeProgressOption = option(args, "--resume-progress");
   const resolvedConfigPath = resolveFrom(benchmarkRoot, configPath);
   const configSource = await readFile(resolvedConfigPath);
@@ -628,6 +685,7 @@ export async function main(args = process.argv.slice(2)) {
     cases.push({ ...benchmarkCase, manifestPath });
   }
   validateUniqueIds(cases, "benchmark case");
+  validateInputs(config, suite, adapters, cases);
   const caseDefinitions = await Promise.all(cases.map(async (item) => ({
     id: item.id,
     title: item.title,
@@ -651,10 +709,15 @@ export async function main(args = process.argv.slice(2)) {
     selectedAdapters: adapters.map((adapter: any) => adapter.id),
     adapterFilter: adapterFilter || null,
     trialsOverride,
-    runUnsupported
+    runUnsupported,
+    strictComparison
   })).digest("hex");
   const selectedAdapterIds = new Set<string>(adapters.map((adapter: any) => String(adapter.id)));
   const selectedCaseIds = new Set<string>(cases.map((benchmarkCase) => String(benchmarkCase.id)));
+  const comparisonWarningList = comparisonWarnings(adapters);
+  if (strictComparison && comparisonWarningList.length) {
+    throw new Error(`strict comparison rejected incomplete or differing metadata: ${comparisonWarningList.join("; ")}`);
+  }
   await mkdir(outputDirectory, { recursive: true });
   const runStartedAt = new Date().toISOString();
   const reportStem = `${suite.id}-${Date.now()}`;
@@ -726,7 +789,8 @@ export async function main(args = process.argv.slice(2)) {
       timeoutMs: Number(adapter.timeoutMs) || null,
       maxOutputBytes: Number(adapter.maxOutputBytes) || DEFAULT_PROCESS_OUTPUT_BYTES
     })),
-    comparisonWarnings: comparisonWarnings(adapters),
+    comparisonWarnings: comparisonWarningList,
+    strictComparison,
     cases: caseDefinitions,
     summary: summarize(results, adapters, cases),
     caseSummary: summarizeCases(results, adapters, cases),
@@ -746,6 +810,7 @@ export async function main(args = process.argv.slice(2)) {
     environment: report.environment,
     suite: report.suite,
     comparisonWarnings: report.comparisonWarnings,
+    strictComparison: report.strictComparison,
     adapter: report.adapterDefinitions.find((item: any) => item.id === result.adapter),
     adapterVersion: report.adapters.find((item: any) => item.id === result.adapter),
     case: report.cases.find((item: any) => item.id === result.caseId),
@@ -763,7 +828,10 @@ async function readProgress(
   caseIds: Set<string>
 ) {
   const content = await readFile(path, "utf8");
-  return content.split(/\r?\n/u).filter(Boolean).map((line, index) => {
+  const lines = content.split(/\r?\n/u);
+  if (lines.at(-1) === "") lines.pop();
+  const seenTrials = new Set<string>();
+  return lines.filter(Boolean).map((line, index) => {
     let entry;
     try { entry = JSON.parse(line); } catch {
       throw new Error(`invalid progress journal JSON at line ${index + 1}`);
@@ -775,6 +843,9 @@ async function readProgress(
     if (!adapterIds.has(entry.result.adapter) || !caseIds.has(entry.result.caseId)) {
       throw new Error(`progress journal line ${index + 1} is outside the selected adapter/case matrix`);
     }
+    const trialKey = `${entry.result.adapter}\0${entry.result.caseId}\0${entry.result.trialId}`;
+    if (seenTrials.has(trialKey)) throw new Error(`progress journal line ${index + 1} duplicates trial ${entry.result.trialId}`);
+    seenTrials.add(trialKey);
     return entry.result;
   });
 }

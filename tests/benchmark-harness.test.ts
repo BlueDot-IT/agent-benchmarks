@@ -245,6 +245,49 @@ test("duplicate benchmark case ids are rejected before benchmark execution", asy
   }
 });
 
+test("strict comparison rejects incomplete adapter metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-strict-comparison-"));
+  const config = join(root, "adapters.json");
+  const suite = await writeSuite(root, [{ id: "strict-case", assertions: [{ type: "stdout_equals", expected: "OK" }] }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{ id: "fixture-agent", command: process.execPath, args: ["-e", "process.stdout.write('OK')"] }]
+  }, null, 2)}\n`);
+  try {
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--strict-comparison", "--output", join(root, "reports")]),
+      /strict comparison rejected incomplete or differing metadata/u
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resume rejects duplicate progress trials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-duplicate-progress-"));
+  const config = join(root, "adapters.json");
+  const suite = await writeSuite(root, [{ id: "progress-case", assertions: [{ type: "stdout_equals", expected: "OK" }] }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{ id: "fixture-agent", command: process.execPath, args: ["-e", "process.stdout.write('OK')"] }]
+  }, null, 2)}\n`);
+  try {
+    const output = join(root, "reports");
+    await main(["--config", config, "--suite", suite, "--output", output]);
+    const progress = join(output, (await readdir(output)).find((name) => name.endsWith(".progress.ndjson"))!);
+    const content = await readFile(progress, "utf8");
+    await writeFile(progress, `${content}${content}`);
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", join(root, "resume-reports"), "--resume-progress", progress]),
+      /duplicates trial/u
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("file_absent rejects a symlink escape instead of treating it as absent", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-benchmark-symlink-"));
   const external = join(root, "external");
