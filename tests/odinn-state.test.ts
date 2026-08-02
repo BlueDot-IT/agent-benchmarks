@@ -28,7 +28,7 @@ test("Odinn benchmark state preparation creates a completed non-secret agent ide
   await assertOdinnBenchmarkStateReady(state);
 
   const config = JSON.parse(await readFile(join(state, "config.json"), "utf8"));
-  for (const capability of ["workspace.readText", "workspace.writeText", "process.exec", "model.chat", "agent.run"]) {
+  for (const capability of ["workspace.readText", "process.exec", "model.chat", "agent.run"]) {
     assert.ok(config.policy.allowedCapabilities.includes(capability));
   }
   assert.equal(config.runtime.allowUnconfinedProcessExec, true);
@@ -52,6 +52,6 @@ test("Odinn benchmark readiness fails closed for missing tool grants and identit
 });
 
 test("Odinn benchmark readiness rejects process execution without explicit unsafe acknowledgement", async () => {
-  const state = await stateFixture(["workspace.readText", "workspace.writeText", "process.exec", "model.chat", "agent.run"]);
+  const state = await stateFixture(["workspace.readText", "process.exec", "model.chat", "agent.run"]);
   await assert.rejects(assertOdinnBenchmarkStateReady(state), /allowUnconfinedProcessExec=true/);
 });
