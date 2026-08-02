@@ -10,6 +10,7 @@ proof that work succeeded.
 ## Principles
 
 - Every adapter receives the same prompt and disposable workspace fixture.
+- Prompt files are materialized inside each trial root before an adapter starts.
 - Every trial gets isolated state and workspace directories.
 - Commands use argument arrays and never an implicit shell.
 - Failures, timeouts, policy denials, and unsupported capabilities remain in

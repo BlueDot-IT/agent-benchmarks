@@ -604,6 +604,41 @@ test("state fixtures cannot reference the benchmark source tree or contain symli
   }
 });
 
+test("adapter prompt files are materialized beside the disposable workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-prompt-isolation-"));
+  const config = join(root, "adapters.json");
+  const output = join(root, "reports");
+  const suite = await writeSuite(root, [{
+    id: "prompt-isolation",
+    fixtureDir: "workspace",
+    assertions: [{ type: "file_json_equals", path: "result.json", expected: { isolated: true } }]
+  }]);
+  const caseWorkspace = join(dirname(suite), "case-1", "workspace");
+  await mkdir(caseWorkspace, { recursive: true });
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: [
+        "-e",
+        "const fs=require('node:fs');const path=require('node:path');const prompt=process.argv[1];fs.writeFileSync(path.join(path.dirname(prompt),'workspace','result.json'),' {\"isolated\":true}\\n'.trimStart());",
+        "{promptFile}"
+      ]
+    }]
+  }, null, 2)}\n`);
+  try {
+    await main(["--config", config, "--suite", suite, "--output", output]);
+    const report = await readOnlyReport(output);
+    assert.equal(report.results[0].verified, true);
+    await assert.rejects(readFile(join(caseWorkspace, "result.json")), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run lock blocks overlap and is released after success", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-benchmark-lock-"));
   const config = join(root, "adapters.json");
