@@ -81,6 +81,23 @@ resolved through environment variables or each runtime's protected credential
 store. Never place secret values in adapter metadata, command arguments, or
 committed fixtures because report envelopes preserve those fields.
 
+After creating the Odinn provider configuration and protected OAuth state,
+prepare its isolated benchmark agent before running any suite:
+
+```bash
+pnpm prepare:odinn-state -- --state benchmarks/state/odinn
+```
+
+This adds the explicitly gated workspace read/write and bounded process
+capabilities, installs a deterministic completed benchmark identity, and
+sets the isolated benchmark state's explicit unconfined-process acknowledgement.
+The harness fails closed before model
+preflight if an Odinn adapter advertises write or process capabilities while
+its fixture is missing those policy grants, has blank identity files, contains
+`BOOTSTRAP.md`, or has an invalid agent manifest/registry. The preparation
+command preserves provider configuration and protected credentials already in
+the state directory; it never creates or prints them.
+
 For OpenClaw, configure the benchmark-only agent workspace from
 `AGENT_BENCH_WORKSPACE`; the example adapter sets it to `{workspace}` for each
 trial. Do not point any adapter at live personal state.

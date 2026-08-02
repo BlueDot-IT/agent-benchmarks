@@ -470,6 +470,7 @@ test("copied non-git benchmark trees retain source provenance", async () => {
   const output = join(root, "reports");
   await mkdir(join(copied, "src"), { recursive: true });
   await writeFile(join(copied, "src", "compare.ts"), await readFile(join(dirname(import.meta.dirname), "src", "compare.ts")));
+  await writeFile(join(copied, "src", "odinn-state.ts"), await readFile(join(dirname(import.meta.dirname), "src", "odinn-state.ts")));
   const suite = await writeSuite(copied, [{
     id: "provenance-case",
     assertions: [{ type: "stdout_equals", expected: "OK" }]
