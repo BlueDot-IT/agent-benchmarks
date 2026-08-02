@@ -246,6 +246,12 @@ async function assertStateFixtureIsolation(adapter: any) {
   let scannedBytes = 0;
   let scannedFiles = 0;
   const textConfiguration = /(?:^|\.)(?:json|ya?ml|toml|env)$/iu;
+  const sourcePathMarkers = new Set([
+    benchmarkRoot,
+    benchmarkRoot.split(sep).join("/"),
+    JSON.stringify(benchmarkRoot).slice(1, -1)
+  ]);
+  const normalizeForHost = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
   const visit = async (directory: string) => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
@@ -262,7 +268,8 @@ async function assertStateFixtureIsolation(adapter: any) {
           throw new Error(`adapter ${adapter.id} state isolation scan exceeded its bound`);
         }
         const content = await readFile(path, "utf8");
-        if (content.includes(benchmarkRoot)) {
+        const normalizedContent = normalizeForHost(content);
+        if ([...sourcePathMarkers].some((marker) => normalizedContent.includes(normalizeForHost(marker)))) {
           throw new Error(`adapter ${adapter.id} state fixture references the benchmark source tree: ${relative(root, path)}`);
         }
       }

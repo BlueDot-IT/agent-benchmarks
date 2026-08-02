@@ -585,7 +585,9 @@ test("state fixtures cannot reference the benchmark source tree or contain symli
   await mkdir(fixture, { recursive: true });
   await writeFile(config, `${JSON.stringify(configuration, null, 2)}\n`);
   try {
-    await writeFile(join(fixture, "config.json"), `${JSON.stringify({ workspace: benchmarkDirectory })}\n`);
+    const serializedConfiguration = `${JSON.stringify({ workspace: benchmarkDirectory })}\n`;
+    if (process.platform === "win32") assert.match(serializedConfiguration, /\\\\/u);
+    await writeFile(join(fixture, "config.json"), serializedConfiguration);
     await assert.rejects(
       main(["--config", config, "--suite", suite, "--output", output]),
       /state fixture references the benchmark source tree/u
