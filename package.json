@@ -10,6 +10,7 @@
   },
   "scripts": {
     "benchmark": "node src/compare.ts",
+    "prepare:odinn-state": "node src/odinn-state.ts",
     "test": "node --test --test-concurrency=1 --test-reporter=spec tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test"

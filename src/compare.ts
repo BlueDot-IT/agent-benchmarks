@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import process from "node:process";
 import { arch, platform, release } from "node:os";
 import { fileURLToPath } from "node:url";
+import { assertOdinnBenchmarkStateReady } from "./odinn-state.ts";
 
 const benchmarkRoot = resolve(import.meta.dirname, "..");
 const DEFAULT_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -799,7 +800,13 @@ export async function main(args = process.argv.slice(2)) {
   }
   validateUniqueIds(cases, "benchmark case");
   validateInputs(config, suite, adapters, cases);
-  for (const adapter of adapters) await assertStateFixtureIsolation(adapter);
+  for (const adapter of adapters) {
+    await assertStateFixtureIsolation(adapter);
+    if (adapter.id === "odinn-forge" && (adapter.capabilities ?? []).some((capability: string) => capability === "workspace.write" || capability === "process.exec")) {
+      if (!adapter.stateFixture) throw new Error("Odinn adapter claims workspace.write/process.exec but has no prepared state fixture");
+      await assertOdinnBenchmarkStateReady(resolveFrom(benchmarkRoot, adapter.stateFixture));
+    }
+  }
   const caseDefinitions = await Promise.all(cases.map(async (item) => ({
     id: item.id,
     title: item.title,
