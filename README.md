@@ -88,15 +88,20 @@ prepare its isolated benchmark agent before running any suite:
 pnpm prepare:odinn-state -- --state benchmarks/state/odinn
 ```
 
-This adds the explicitly gated workspace read/write and bounded process
+This adds the explicitly gated workspace read and bounded process
 capabilities, installs a deterministic completed benchmark identity, and
 sets the isolated benchmark state's explicit unconfined-process acknowledgement.
 The harness fails closed before model
 preflight if an Odinn adapter advertises write or process capabilities while
-its fixture is missing those policy grants, has blank identity files, contains
+its fixture is missing the required read/process grants, has blank identity files, contains
 `BOOTSTRAP.md`, or has an invalid agent manifest/registry. The preparation
 command preserves provider configuration and protected credentials already in
 the state directory; it never creates or prints them.
+
+Odinn intentionally does not expose `workspace.writeText` until its filesystem
+implementation can resist concurrent parent-directory replacement. Benchmark
+write cases use the explicitly unconfined `process.exec` capability inside the
+disposable trial workspace instead.
 
 For OpenClaw, configure the benchmark-only agent workspace from
 `AGENT_BENCH_WORKSPACE`; the example adapter sets it to `{workspace}` for each

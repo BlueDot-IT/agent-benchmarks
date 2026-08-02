@@ -5,7 +5,6 @@ import { pathToFileURL } from "node:url";
 
 const REQUIRED_POLICY_CAPABILITIES = Object.freeze([
   "workspace.readText",
-  "workspace.writeText",
   "process.exec",
   "model.chat",
   "agent.run"
@@ -15,7 +14,7 @@ const IDENTITY_FILES = Object.freeze({
   "IDENTITY.md": "# Identity\n\nName: Odinn Benchmark Agent\nNature: deterministic isolated evaluation agent\nVoice: concise, direct, evidence-driven\n",
   "SOUL.md": "# Operating Contract\n\nExecute the supplied benchmark task directly. Use only the bounded tools exposed by the runtime, remain inside the disposable workspace, verify requested artifacts, and report only outcomes supported by tool results.\n",
   "USER.md": "# User\n\nThe benchmark operator expects immediate task execution, reproducible artifacts, and no onboarding conversation.\n",
-  "AGENTS.md": "# Agent Instructions\n\nThis benchmark identity is already initialized. Do not start identity setup or recreate BOOTSTRAP.md. Work only in the current disposable workspace. Use workspace.readText, workspace.writeText, and process.exec when the task requires them.\n"
+  "AGENTS.md": "# Agent Instructions\n\nThis benchmark identity is already initialized. Do not start identity setup or recreate BOOTSTRAP.md. Work only in the current disposable workspace. Use workspace.readText for inspection and the explicitly unconfined process.exec tool for commands and file modifications.\n"
 });
 
 function stableJson(value: any): string {
