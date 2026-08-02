@@ -509,8 +509,10 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
   const trialRoot = await mkdtemp(join(tmpdir(), "agent-bench-"));
   try {
     const { workspace, state } = await prepareTrial(adapter, benchmarkCase, caseDirectory, trialRoot);
-    const promptPath = await resolveExistingContained(caseDirectory, benchmarkCase.promptFile, "prompt");
-    const prompt = await readFile(promptPath, "utf8");
+    const promptSourcePath = await resolveExistingContained(caseDirectory, benchmarkCase.promptFile, "prompt");
+    const prompt = await readFile(promptSourcePath, "utf8");
+    const promptPath = join(trialRoot, "prompt.md");
+    await writeFile(promptPath, prompt);
     const inputFile = join(trialRoot, "input.json");
     const caseTimeoutMs = Number(benchmarkCase.timeoutMs ?? adapter.timeoutMs) || 600_000;
     const modelTimeoutMs = Math.max(1_000, Math.min(300_000, caseTimeoutMs - 5_000));
