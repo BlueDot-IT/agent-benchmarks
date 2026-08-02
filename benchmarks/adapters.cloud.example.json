@@ -17,6 +17,12 @@
         "workspace.write",
         "process.exec"
       ],
+      "preflight": {
+        "prompt": "Reply with exactly AGENT_BENCH_PREFLIGHT_OK and do not call tools.",
+        "expected": "AGENT_BENCH_PREFLIGHT_OK",
+        "timeoutMs": 300000,
+        "maxTurns": 2
+      },
       "command": "odinn",
       "args": [
         "run",
@@ -61,6 +67,12 @@
         "workspace.write",
         "process.exec"
       ],
+      "preflight": {
+        "prompt": "Reply with exactly AGENT_BENCH_PREFLIGHT_OK and do not call tools.",
+        "expected": "AGENT_BENCH_PREFLIGHT_OK",
+        "timeoutMs": 300000,
+        "maxTurns": 2
+      },
       "command": "openclaw",
       "args": [
         "agent",
@@ -113,6 +125,12 @@
         "workspace.write",
         "process.exec"
       ],
+      "preflight": {
+        "prompt": "Reply with exactly AGENT_BENCH_PREFLIGHT_OK and do not call tools.",
+        "expected": "AGENT_BENCH_PREFLIGHT_OK",
+        "timeoutMs": 300000,
+        "maxTurns": 2
+      },
       "command": "hermes",
       "args": [
         "--oneshot",

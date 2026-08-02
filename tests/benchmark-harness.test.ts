@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -494,6 +494,175 @@ test("copied non-git benchmark trees retain source provenance", async () => {
     const report = await readOnlyReport(output);
     assert.equal(report.benchmarkCommit, null);
     assert.match(report.benchmarkSourceDigest, /^[0-9a-f]{64}$/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adapter preflight succeeds before scored trials and is recorded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-preflight-success-"));
+  const config = join(root, "adapters.json");
+  const output = join(root, "reports");
+  const suite = await writeSuite(root, [{
+    id: "preflight-success",
+    assertions: [{ type: "stdout_equals", expected: "OK" }]
+  }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: ["-e", "process.stdout.write(process.argv[1].includes('PREFLIGHT')?'READY':'OK')", "{prompt}"],
+      preflight: { prompt: "PREFLIGHT", expected: "READY", timeoutMs: 5_000 }
+    }]
+  }, null, 2)}\n`);
+  try {
+    await main(["--config", config, "--suite", suite, "--output", output]);
+    const report = await readOnlyReport(output);
+    assert.equal(report.results.length, 1);
+    assert.equal(report.results[0].verified, true);
+    assert.equal(report.adapterDefinitions[0].preflightConfigured, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed adapter preflight aborts before any scored trial", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-preflight-failure-"));
+  const config = join(root, "adapters.json");
+  const output = join(root, "reports");
+  const invocations = join(root, "invocations.txt");
+  const suite = await writeSuite(root, [{
+    id: "preflight-failure",
+    assertions: [{ type: "stdout_equals", expected: "OK" }]
+  }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: ["-e", `require('node:fs').appendFileSync(${JSON.stringify(invocations)},'run\\n');process.stdout.write('NOT_READY')`],
+      preflight: { prompt: "PREFLIGHT", expected: "READY", timeoutMs: 5_000 }
+    }]
+  }, null, 2)}\n`);
+  try {
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", output]),
+      /adapter fixture-agent preflight failed/u
+    );
+    assert.equal(await readFile(invocations, "utf8"), "run\n");
+    await assert.rejects(readFile(output), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("state fixtures cannot reference the benchmark source tree or contain symlinks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-state-isolation-"));
+  const benchmarkDirectory = dirname(import.meta.dirname);
+  const fixture = join(benchmarkDirectory, "benchmarks", "state", `test-${process.pid}-${Date.now()}`);
+  const config = join(root, "adapters.json");
+  const output = join(root, "reports");
+  const suite = await writeSuite(root, [{
+    id: "state-isolation",
+    assertions: [{ type: "stdout_equals", expected: "OK" }]
+  }]);
+  const configuration = {
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('OK')"],
+      stateFixture: fixture
+    }]
+  };
+  await mkdir(fixture, { recursive: true });
+  await writeFile(config, `${JSON.stringify(configuration, null, 2)}\n`);
+  try {
+    const serializedConfiguration = `${JSON.stringify({ workspace: benchmarkDirectory })}\n`;
+    if (process.platform === "win32") assert.match(serializedConfiguration, /\\\\/u);
+    await writeFile(join(fixture, "config.json"), serializedConfiguration);
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", output]),
+      /state fixture references the benchmark source tree/u
+    );
+    await rm(join(fixture, "config.json"));
+    await symlink(benchmarkDirectory, join(fixture, "source-link"));
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", output]),
+      /state fixture contains a symbolic link/u
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("run lock blocks overlap and is released after success", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-lock-"));
+  const config = join(root, "adapters.json");
+  const output = join(root, "reports");
+  const lock = join(root, "daily.lock");
+  const suite = await writeSuite(root, [{
+    id: "lock-case",
+    assertions: [{ type: "stdout_equals", expected: "OK" }]
+  }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('OK')"]
+    }]
+  }, null, 2)}\n`);
+  try {
+    await writeFile(lock, `${JSON.stringify({ schemaVersion: 1, pid: process.pid })}\n`, { mode: 0o600 });
+    await assert.rejects(
+      main(["--config", config, "--suite", suite, "--output", output, "--lock-file", lock]),
+      /benchmark lock is held by active process/u
+    );
+    await rm(lock);
+    await main(["--config", config, "--suite", suite, "--output", output, "--lock-file", lock]);
+    await assert.rejects(readFile(lock), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fixed progress files create once and resume deterministically", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-benchmark-fixed-progress-"));
+  const config = join(root, "adapters.json");
+  const output = join(root, "reports");
+  const progress = join(root, "daily.progress.ndjson");
+  const invocations = join(root, "invocations.txt");
+  const suite = await writeSuite(root, [{
+    id: "fixed-progress",
+    assertions: [{ type: "stdout_equals", expected: "OK" }]
+  }]);
+  await writeFile(config, `${JSON.stringify({
+    schemaVersion: 1,
+    executionPolicy: "trusted-local",
+    adapters: [{
+      id: "fixture-agent",
+      capabilities: ["text.generate"],
+      command: process.execPath,
+      args: ["-e", `require('node:fs').appendFileSync(${JSON.stringify(invocations)},'run\\n');process.stdout.write('OK')`]
+    }]
+  }, null, 2)}\n`);
+  try {
+    await main(["--config", config, "--suite", suite, "--output", output, "--progress-file", progress]);
+    await main(["--config", config, "--suite", suite, "--output", output, "--progress-file", progress]);
+    assert.equal(await readFile(invocations, "utf8"), "run\n");
+    assert.equal((await readFile(progress, "utf8")).trim().split("\n").length, 1);
+    assert.equal((await readdir(output)).filter((name) => name.endsWith(".json")).length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
