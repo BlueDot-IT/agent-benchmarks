@@ -114,6 +114,8 @@ Useful options:
 - `--strict-comparison` — fail before execution when comparison metadata is incomplete or differs
 - `--output <directory>` — select the report directory
 - `--resume-progress <journal>` — continue an interrupted matrix; duplicate trial records are rejected
+- `--progress-file <journal>` — create a fixed journal or resume it when it already exists
+- `--lock-file <path>` — prevent overlapping matrices and preserve stale lock evidence
 
 Reports default to `dist/benchmarks/`:
 
@@ -124,6 +126,13 @@ Reports default to `dist/benchmarks/`:
 Progress journals are bound to a SHA-256 fingerprint of the selected
 configuration, suite, cases, source tree, and run options. A changed input
 cannot be silently resumed as though it belonged to the original run.
+
+Maintained adapter configurations should define a bounded `preflight` prompt
+and exact trimmed sentinel. All selected adapters must pass that real model-backed
+health check before the first scored trial. The runner also rejects text
+configuration in a state fixture that points back into the benchmark source
+tree and verifies after every preflight and scored trial that benchmark inputs
+were not modified.
 
 Publish both `verifiedRateExecuted` and `verifiedRateAllTrials`. The former
 excludes declared unsupported trials; the latter keeps them in the denominator.

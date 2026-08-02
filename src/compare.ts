@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, realpathSync } from "node:fs";
-import { appendFile, cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -32,7 +32,8 @@ function usage() {
   pnpm benchmark -- --config <adapters.json> [--suite benchmarks/suites/smoke.json]
     [--adapter <id>] [--trials <count>] [--output <directory>] [--keep-workspaces]
     [--run-unsupported] [--strict-comparison]
-    [--resume-progress <run.progress.ndjson>]
+    [--resume-progress <run.progress.ndjson>] [--progress-file <run.progress.ndjson>]
+    [--lock-file <path>]
 
 The runner never invokes a shell. Adapter commands and grading commands are
 executed as argument arrays inside disposable case workspaces.`);
@@ -236,6 +237,97 @@ function terminateProcessTree(child: { pid?: number; kill(signal?: NodeJS.Signal
 function minimalProcessEnvironment(): NodeJS.ProcessEnv {
   const allowed = ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "HOME", "USERPROFILE", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TERM", "CI", "NO_COLOR"];
   return Object.fromEntries(allowed.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]));
+}
+
+async function assertStateFixtureIsolation(adapter: any) {
+  if (!adapter.stateFixture) return;
+  const fixture = resolveFrom(benchmarkRoot, adapter.stateFixture);
+  const root = await realpath(fixture);
+  let scannedBytes = 0;
+  let scannedFiles = 0;
+  const textConfiguration = /(?:^|\.)(?:json|ya?ml|toml|env)$/iu;
+  const visit = async (directory: string) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`adapter ${adapter.id} state fixture contains a symbolic link: ${relative(root, path)}`);
+      }
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile() && textConfiguration.test(entry.name)) {
+        const metadata = await lstat(path);
+        if (metadata.size > 2 * 1024 * 1024) continue;
+        scannedFiles += 1;
+        scannedBytes += metadata.size;
+        if (scannedFiles > 10_000 || scannedBytes > 64 * 1024 * 1024) {
+          throw new Error(`adapter ${adapter.id} state isolation scan exceeded its bound`);
+        }
+        const content = await readFile(path, "utf8");
+        if (content.includes(benchmarkRoot)) {
+          throw new Error(`adapter ${adapter.id} state fixture references the benchmark source tree: ${relative(root, path)}`);
+        }
+      }
+    }
+  };
+  await visit(root);
+}
+
+async function runAdapterPreflight(adapter: any) {
+  if (!adapter.preflight) return;
+  const directory = await mkdtemp(join(tmpdir(), "agent-bench-preflight-"));
+  try {
+    const promptFile = join(directory, "prompt.md");
+    const expected = String(adapter.preflight.expected);
+    await writeFile(promptFile, `${String(adapter.preflight.prompt)}\n`);
+    const result = await runTrial(adapter, {
+      id: "adapter-preflight",
+      promptFile: "prompt.md",
+      assertions: [{ type: "stdout_equals", expected, trim: true }],
+      timeoutMs: Number(adapter.preflight.timeoutMs) || 300_000,
+      maxTurns: Number(adapter.preflight.maxTurns) || 2
+    }, directory, 0, false);
+    if (!result.verified) {
+      const reason = result.timedOut ? "timed out"
+        : result.outputLimitExceeded ? "exceeded output limit"
+          : result.outputError ? `invalid output: ${result.outputError}`
+            : `exit ${result.exitCode ?? "missing"}`;
+      throw new Error(`adapter ${adapter.id} preflight failed (${reason})`);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function acquireRunLock(path: string) {
+  const resolved = resolveFrom(benchmarkRoot, path);
+  await mkdir(dirname(resolved), { recursive: true });
+  const claim = async () => {
+    const handle = await open(resolved, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, createdAt: new Date().toISOString() })}\n`);
+    } finally {
+      await handle.close();
+    }
+  };
+  try {
+    await claim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+    let owner: any;
+    try { owner = JSON.parse(await readFile(resolved, "utf8")); } catch {}
+    const pid = Number(owner?.pid);
+    let active = Number.isSafeInteger(pid) && pid > 0;
+    if (active) {
+      try { process.kill(pid, 0); } catch { active = false; }
+    }
+    if (active) throw new Error(`benchmark lock is held by active process ${pid}: ${resolved}`);
+    await rename(resolved, `${resolved}.stale-${Date.now()}`);
+    await claim();
+  }
+  return async () => {
+    const owner = JSON.parse(await readFile(resolved, "utf8"));
+    if (owner.pid !== process.pid) throw new Error("benchmark lock ownership changed before release");
+    await unlink(resolved);
+  };
 }
 
 function normalizeOutput(processResult: any, adapter: any) {
@@ -591,6 +683,11 @@ function validateInputs(config: any, suite: any, adapters: any[], cases: any[]) 
     assertNonEmptyString(adapter.command, `adapter ${adapter.id}.command`);
     if (adapter.args !== undefined && !Array.isArray(adapter.args)) throw new Error(`adapter ${adapter.id}.args must be an array`);
     if (adapter.capabilities !== undefined && !Array.isArray(adapter.capabilities)) throw new Error(`adapter ${adapter.id}.capabilities must be an array`);
+    if (adapter.preflight !== undefined) {
+      assertObject(adapter.preflight, `adapter ${adapter.id}.preflight`);
+      assertNonEmptyString(adapter.preflight.prompt, `adapter ${adapter.id}.preflight.prompt`);
+      assertNonEmptyString(adapter.preflight.expected, `adapter ${adapter.id}.preflight.expected`);
+    }
   }
   for (const benchmarkCase of cases) {
     assertObject(benchmarkCase, "benchmark case");
@@ -668,6 +765,13 @@ export async function main(args = process.argv.slice(2)) {
   const runUnsupported = hasFlag(args, "--run-unsupported");
   const strictComparison = hasFlag(args, "--strict-comparison");
   const resumeProgressOption = option(args, "--resume-progress");
+  const progressFileOption = option(args, "--progress-file");
+  if (resumeProgressOption && progressFileOption) {
+    throw new Error("--resume-progress and --progress-file cannot be used together");
+  }
+  const lockFileOption = option(args, "--lock-file");
+  const releaseLock = lockFileOption ? await acquireRunLock(lockFileOption) : async () => {};
+  try {
   const resolvedConfigPath = resolveFrom(benchmarkRoot, configPath);
   const configSource = await readFile(resolvedConfigPath);
   const suiteSource = await readFile(suitePath);
@@ -686,6 +790,7 @@ export async function main(args = process.argv.slice(2)) {
   }
   validateUniqueIds(cases, "benchmark case");
   validateInputs(config, suite, adapters, cases);
+  for (const adapter of adapters) await assertStateFixtureIsolation(adapter);
   const caseDefinitions = await Promise.all(cases.map(async (item) => ({
     id: item.id,
     title: item.title,
@@ -718,16 +823,27 @@ export async function main(args = process.argv.slice(2)) {
   if (strictComparison && comparisonWarningList.length) {
     throw new Error(`strict comparison rejected incomplete or differing metadata: ${comparisonWarningList.join("; ")}`);
   }
+  for (const adapter of adapters) {
+    await runAdapterPreflight(adapter);
+    const currentSourceDigest = await digestDirectory(benchmarkRoot, { excluded: sourceDigestExclusions });
+    if (currentSourceDigest !== benchmarkSourceDigest) throw new Error(`adapter ${adapter.id} preflight modified benchmark source`);
+  }
   await mkdir(outputDirectory, { recursive: true });
   const runStartedAt = new Date().toISOString();
   const reportStem = `${suite.id}-${Date.now()}`;
   const progressPath = resumeProgressOption
     ? resolveFrom(benchmarkRoot, resumeProgressOption)
-    : join(outputDirectory, `${reportStem}.progress.ndjson`);
-  const results = resumeProgressOption
+    : progressFileOption
+      ? resolveFrom(benchmarkRoot, progressFileOption)
+      : join(outputDirectory, `${reportStem}.progress.ndjson`);
+  const resumeProgress = Boolean(resumeProgressOption || (progressFileOption && await pathExists(progressPath)));
+  const results = resumeProgress
     ? await readProgress(progressPath, suite.id, runFingerprint, selectedAdapterIds, selectedCaseIds)
     : [];
-  if (!resumeProgressOption) await writeFile(progressPath, "");
+  if (!resumeProgress) {
+    await mkdir(dirname(progressPath), { recursive: true });
+    await writeFile(progressPath, "", { flag: "wx", mode: 0o600 });
+  }
   for (const benchmarkCase of cases) {
     const caseDirectory = dirname(benchmarkCase.manifestPath);
     for (const adapter of adapters) {
@@ -752,6 +868,10 @@ export async function main(args = process.argv.slice(2)) {
       }
       for (let index = completedTrials; index < trials; index += 1) {
         const result = await runTrial(adapter, benchmarkCase, caseDirectory, index, keepWorkspaces);
+        const currentSourceDigest = await digestDirectory(benchmarkRoot, { excluded: sourceDigestExclusions });
+        if (currentSourceDigest !== benchmarkSourceDigest) {
+          throw new Error(`adapter ${adapter.id} modified benchmark source during ${benchmarkCase.id}`);
+        }
         results.push(result);
         await appendFile(progressPath, `${JSON.stringify({ recordedAt: new Date().toISOString(), suite: suite.id, runFingerprint, result })}\n`);
         console.error(`[bench] ${benchmarkCase.id} · ${adapter.id} · trial ${index + 1}/${trials} · ${result.status} · ${Math.round(result.durationMs)} ms`);
@@ -784,6 +904,7 @@ export async function main(args = process.argv.slice(2)) {
       args: adapter.args ?? [],
       envKeys: Object.keys(adapter.env ?? {}).sort(),
       stdinConfigured: adapter.stdin !== undefined,
+      preflightConfigured: adapter.preflight !== undefined,
       stateFixture: adapter.stateFixture ?? null,
       output: adapter.output ?? { format: "text" },
       timeoutMs: Number(adapter.timeoutMs) || null,
@@ -817,7 +938,20 @@ export async function main(args = process.argv.slice(2)) {
     result
   })).join("\n");
   await writeFile(jsonlPath, `${jsonl}\n`);
-  console.log(JSON.stringify({ reportPath, jsonlPath, progressPath, resumedFrom: resumeProgressOption ? basename(progressPath) : null, summary: report.summary, caseSummary: report.caseSummary }, null, 2));
+  console.log(JSON.stringify({ reportPath, jsonlPath, progressPath, resumedFrom: resumeProgress ? basename(progressPath) : null, summary: report.summary, caseSummary: report.caseSummary }, null, 2));
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function pathExists(path: string) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isMissingError(error)) return false;
+    throw error;
+  }
 }
 
 async function readProgress(
