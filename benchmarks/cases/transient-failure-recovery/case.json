@@ -14,7 +14,7 @@
     {
       "type": "file_sha256",
       "path": "unstable-check.mjs",
-      "expected": "ebbefb658c1103aeb4d9f75d869e081d470df9be8a024db41e68e45ff74bf657"
+      "expected": "a80694c868372e78b6a18c46c8985abada8f80cc03133a5a8c1aaf6c5e16d1de"
     },
     {
       "type": "file_equals",
