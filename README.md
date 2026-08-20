@@ -88,20 +88,23 @@ prepare its isolated benchmark agent before running any suite:
 pnpm prepare:odinn-state -- --state benchmarks/state/odinn
 ```
 
-This adds the explicitly gated workspace read and bounded process
-capabilities, installs a deterministic completed benchmark identity, and
-sets the isolated benchmark state's explicit unconfined-process acknowledgement.
-The harness fails closed before model
-preflight if an Odinn adapter advertises write or process capabilities while
-its fixture is missing the required read/process grants, has blank identity files, contains
+This adds the governed workspace read/mutation capabilities, installs a
+deterministic completed benchmark identity, and configures the digest-pinned
+Linux OCI process sandbox. The maintained CLI adapter advertises `process.exec`
+and passes `--durable-process --confirm-process`; the confirmation is explicit
+local operator authorization, while commands still run in a denied-network,
+read-only container and workspace changes use governed mutations. Process-dependent cases are therefore executed on Linux
+hosts with Docker/OCI available; they remain unsupported when the adapter does
+not declare the capability. The harness fails closed before model preflight if
+an Odinn adapter advertises write or process capabilities while its fixture is
+missing the required workspace grants, has blank identity files, contains
 `BOOTSTRAP.md`, or has an invalid agent manifest/registry. The preparation
 command preserves provider configuration and protected credentials already in
 the state directory; it never creates or prints them.
 
-Odinn intentionally does not expose `workspace.writeText` until its filesystem
-implementation can resist concurrent parent-directory replacement. Benchmark
-write cases use the explicitly unconfined `process.exec` capability inside the
-disposable trial workspace instead.
+Odinn's benchmark write cases use the governed `workspace.mutate` and
+`workspace.patch` tools inside the disposable trial workspace. This keeps the
+benchmark aligned with the product's current filesystem safety boundary.
 
 For OpenClaw, configure the benchmark-only agent workspace from
 `AGENT_BENCH_WORKSPACE`; the example adapter sets it to `{workspace}` for each

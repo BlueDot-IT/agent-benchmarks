@@ -133,7 +133,7 @@ test("transient failure case requires one failed command followed by recovery", 
       command: process.execPath,
       args: [
         "-e",
-        "const cp=require('node:child_process');const first=cp.spawnSync(process.execPath,['unstable-check.mjs']);if(first.status!==75)process.exit(1);const second=cp.spawnSync(process.execPath,['unstable-check.mjs']);if(second.status!==0)process.exit(1);process.stdout.write('BENCHMARK_OK')"
+        "const fs=require('node:fs');const cp=require('node:child_process');const first=cp.spawnSync(process.execPath,['unstable-check.mjs']);if(first.status!==75)process.exit(1);fs.writeFileSync('attempt-count.txt','1\\n');const second=cp.spawnSync(process.execPath,['unstable-check.mjs']);if(second.status!==0)process.exit(1);fs.writeFileSync('attempt-count.txt','2\\n');fs.writeFileSync('recovery.json',JSON.stringify({status:'recovered',attempts:2})+'\\n');process.stdout.write('BENCHMARK_OK')"
       ],
       output: { format: "text" }
     }]

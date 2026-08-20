@@ -29,9 +29,14 @@
         "agent.run",
         "--input-file",
         "{inputFile}",
+        "--durable-process",
+        "--confirm-process",
         "--state",
         "{state}"
       ],
+      "env": {
+        "INIT_CWD": "{workspace}"
+      },
       "stateFixture": "benchmarks/state/odinn",
       "output": {
         "format": "json",
@@ -124,7 +129,8 @@
         "{prompt}"
       ],
       "env": {
-        "HERMES_HOME": "{state}"
+        "HERMES_HOME": "{state}",
+        "TERMINAL_CWD": "{workspace}"
       },
       "stateFixture": "benchmarks/state/hermes",
       "output": {
