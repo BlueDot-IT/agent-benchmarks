@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, realpathSync } from "node:fs";
-import { appendFile, chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { appendFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -579,41 +579,8 @@ async function runTrial(adapter: any, benchmarkCase: any, caseDirectory: string,
       retainedWorkspace: keepWorkspaces ? trialRoot : null
     };
   } finally {
-    if (!keepWorkspaces) await removeDisposableTree(trialRoot);
+    if (!keepWorkspaces) await rm(trialRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
-}
-
-async function removeDisposableTree(root: string): Promise<void> {
-  try {
-    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-    return;
-  } catch (error: any) {
-    if (!error || !["EACCES", "EPERM"].includes(error.code)) throw error;
-  }
-  const loosen = async (path: string): Promise<void> => {
-    let metadata;
-    try { metadata = await lstat(path); } catch (error: any) { if (error?.code === "ENOENT") return; throw error; }
-    if (metadata.isSymbolicLink()) return;
-    if (metadata.isDirectory()) {
-      let entries: string[];
-      try {
-        entries = await readdir(path);
-      } catch (error: any) {
-        if (error?.code === "ENOENT") return;
-        throw error;
-      }
-      for (const entry of entries) await loosen(join(path, entry));
-      try { await chmod(path, 0o700); } catch (error: any) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-    } else if (metadata.isFile()) {
-      try { await chmod(path, 0o600); } catch (error: any) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-    }
-  };
-  await loosen(root);
-  await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
 function summarize(results: any[], adapters: any[], cases: any[]) {

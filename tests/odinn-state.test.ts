@@ -73,6 +73,16 @@ test("Odinn benchmark readiness rejects stale direct process execution grants", 
   await assert.rejects(assertOdinnBenchmarkStateReady(state), /must not expose canonical process\.execute/);
 });
 
+test("Odinn benchmark readiness rejects an alternate process image", async () => {
+  const state = await stateFixture();
+  await prepareOdinnBenchmarkState(state);
+  const configPath = join(state, "config.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.sandbox.process.image = `docker.io/library/node@sha256:${"0".repeat(64)}`;
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  await assert.rejects(assertOdinnBenchmarkStateReady(state), /sanctioned digest-pinned OCI process sandbox/);
+});
+
 test("Odinn benchmark preparation scrubs migrated process grants while preserving provider configuration", async () => {
   const state = await stateFixture(["workspace.readText", "model.chat", "agent.run", "process.execute"]);
   const configPath = join(state, "config.json");

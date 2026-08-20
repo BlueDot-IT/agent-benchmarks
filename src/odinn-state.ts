@@ -177,10 +177,9 @@ export async function assertOdinnBenchmarkStateReady(stateDirectory: string) {
   }
   if (config?.sandbox?.process?.enabled !== true
     || config.sandbox.process.shell !== false
-    || typeof config.sandbox.process.image !== "string"
-    || !/^.+@sha256:[a-f0-9]{64}$/u.test(config.sandbox.process.image)
+    || config.sandbox.process.image !== PROCESS_IMAGE
     || config?.sandbox?.backend?.mode !== "oci") {
-    throw new Error("Odinn benchmark state must expose the digest-pinned OCI process sandbox");
+    throw new Error("Odinn benchmark state must expose the sanctioned digest-pinned OCI process sandbox");
   }
   const { integrity, ...unsigned } = manifest;
   const expectedIntegrity = createHash("sha256").update(stableJson(unsigned)).digest("hex");
