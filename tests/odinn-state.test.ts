@@ -28,15 +28,12 @@ test("Odinn benchmark state preparation creates a completed non-secret agent ide
   await assertOdinnBenchmarkStateReady(state);
 
   const config = JSON.parse(await readFile(join(state, "config.json"), "utf8"));
-  for (const capability of ["workspace.readText", "workspace.mutate", "workspace.patch", "model.chat", "agent.run", "process.exec"]) {
+  for (const capability of ["workspace.readText", "workspace.mutate", "workspace.patch", "model.chat", "agent.run"]) {
     assert.ok(config.policy.allowedCapabilities.includes(capability));
   }
+  assert.equal(config.policy.allowedCapabilities.includes("process.exec"), false);
   assert.equal(config.policy.allowedCapabilities.includes("process.execute"), false);
   assert.equal(config.runtime?.allowUnconfinedProcessExec, undefined);
-  assert.equal(config.sandbox.backend.mode, "oci");
-  assert.equal(config.sandbox.process.enabled, true);
-  assert.equal(config.sandbox.process.shell, false);
-  assert.match(config.sandbox.process.image, /@sha256:[a-f0-9]{64}$/u);
   const agents = JSON.parse(await readFile(join(state, "agents.json"), "utf8"));
   assert.equal(agents.defaultAgentId, "main");
   assert.equal(agents.agents[0].status, "enabled");
@@ -66,21 +63,11 @@ test("Odinn benchmark readiness rejects stale direct process execution grants", 
   await prepareOdinnBenchmarkState(state);
   const configPath = join(state, "config.json");
   const config = JSON.parse(await readFile(configPath, "utf8"));
-  config.policy.allowedCapabilities.push("process.execute");
+  config.policy.allowedCapabilities.push("process.exec", "process.execute");
   config.policy.scopedCapabilities = [{ tool: "process.exec", capability: "process.execute" }];
   config.runtime = { allowUnconfinedProcessExec: true };
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  await assert.rejects(assertOdinnBenchmarkStateReady(state), /must not expose canonical process\.execute/);
-});
-
-test("Odinn benchmark readiness rejects an alternate process image", async () => {
-  const state = await stateFixture();
-  await prepareOdinnBenchmarkState(state);
-  const configPath = join(state, "config.json");
-  const config = JSON.parse(await readFile(configPath, "utf8"));
-  config.sandbox.process.image = `docker.io/library/node@sha256:${"0".repeat(64)}`;
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  await assert.rejects(assertOdinnBenchmarkStateReady(state), /sanctioned digest-pinned OCI process sandbox/);
+  await assert.rejects(assertOdinnBenchmarkStateReady(state), /must not expose direct or unconfined process execution/);
 });
 
 test("Odinn benchmark preparation scrubs migrated process grants while preserving provider configuration", async () => {
@@ -96,10 +83,22 @@ test("Odinn benchmark preparation scrubs migrated process grants while preservin
 
   await prepareOdinnBenchmarkState(state);
   const prepared = JSON.parse(await readFile(configPath, "utf8"));
-  assert.equal(prepared.policy.allowedCapabilities.includes("process.exec"), true);
+  assert.equal(prepared.policy.allowedCapabilities.includes("process.exec"), false);
   assert.equal(prepared.policy.allowedCapabilities.includes("process.execute"), false);
   assert.deepEqual(prepared.policy.scopedCapabilities, [{ tool: "workspace.readText", capability: "workspace.read" }]);
   assert.equal(prepared.runtime.allowUnconfinedProcessExec, undefined);
   assert.equal(prepared.runtime.keepThisSetting, "intact");
   assert.deepEqual(prepared.providers, config.providers);
+});
+
+test("maintained Odinn one-shot adapters do not advertise unsupported process execution", async () => {
+  for (const name of ["adapters.example.json", "adapters.cloud.example.json"]) {
+    const fixture = JSON.parse(await readFile(new URL(`../benchmarks/${name}`, import.meta.url), "utf8"));
+    const adapter = fixture.adapters.find((item: { id?: string }) => item.id === "odinn-forge");
+    assert.ok(adapter, `${name} must define the maintained Odinn adapter`);
+    assert.equal(adapter.capabilities.includes("process.exec"), false);
+    assert.equal(adapter.args.includes("--durable-process"), false);
+    assert.equal(adapter.args.includes("--confirm-process"), false);
+    assert.deepEqual(adapter.args.slice(0, 5), ["run", "--tool", "agent.run", "--input-file", "{inputFile}"]);
+  }
 });

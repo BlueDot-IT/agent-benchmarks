@@ -14,8 +14,7 @@
       "capabilities": [
         "text.generate",
         "workspace.read",
-        "workspace.write",
-        "process.exec"
+        "workspace.write"
       ],
       "preflight": {
         "prompt": "Reply with exactly AGENT_BENCH_PREFLIGHT_OK and do not call tools.",
@@ -30,8 +29,6 @@
         "agent.run",
         "--input-file",
         "{inputFile}",
-        "--durable-process",
-        "--confirm-process",
         "--state",
         "{state}"
       ],

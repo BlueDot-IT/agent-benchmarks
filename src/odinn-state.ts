@@ -8,17 +8,15 @@ const REQUIRED_POLICY_CAPABILITIES = Object.freeze([
   "workspace.mutate",
   "workspace.patch",
   "model.chat",
-  "agent.run",
-  "process.exec"
+  "agent.run"
 ]);
 const DIRECT_PROCESS_CAPABILITIES = new Set(["process.exec", "process.execute"]);
-const PROCESS_IMAGE = "docker.io/library/node@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03";
 
 const IDENTITY_FILES = Object.freeze({
   "IDENTITY.md": "# Identity\n\nName: Odinn Benchmark Agent\nNature: deterministic isolated evaluation agent\nVoice: concise, direct, evidence-driven\n",
   "SOUL.md": "# Operating Contract\n\nExecute the supplied benchmark task directly. Use only the bounded tools exposed by the runtime, remain inside the disposable workspace, verify requested artifacts, and report only outcomes supported by tool results.\n",
   "USER.md": "# User\n\nThe benchmark operator expects immediate task execution, reproducible artifacts, and no onboarding conversation.\n",
-  "AGENTS.md": "# Agent Instructions\n\nThis benchmark identity is already initialized. Do not start identity setup or recreate BOOTSTRAP.md. Work only in the current disposable workspace. Use workspace.readText for inspection and workspace.mutate or workspace.patch for file changes. For governed mutations, omit expected unless an exact state is available; never guess or send an empty expected.digest. Use process.exec only for bounded argument-array commands against the sealed read-only workspace; never expect it to persist files. Verify resulting artifacts with bounded process commands after governed mutations. workspace.readText maxBytes must be no greater than 2000000; omit it when the default is sufficient. For exact structured or arithmetic answers, calculate intermediate terms explicitly, recheck the result, and preserve the requested output shape and key order.\n"
+  "AGENTS.md": "# Agent Instructions\n\nThis benchmark identity is already initialized. Do not start identity setup or recreate BOOTSTRAP.md. Work only in the current disposable workspace. Use workspace.readText for inspection and workspace.mutate or workspace.patch for file changes. For governed mutations, omit expected unless an exact state is available; never guess or send an empty expected.digest. The one-shot agent adapter does not authorize process execution; do not attempt process.exec. Verify resulting artifacts with workspace.readText. workspace.readText maxBytes must be no greater than 2000000; omit it when the default is sufficient. For exact structured or arithmetic answers, calculate intermediate terms explicitly, recheck the result, and preserve the requested output shape and key order.\n"
 });
 
 function stableJson(value: any): string {
@@ -78,7 +76,7 @@ export async function prepareOdinnBenchmarkState(stateDirectory: string) {
   config.policy ??= {};
   const allowed = new Set(Array.isArray(config.policy.allowedCapabilities) ? config.policy.allowedCapabilities.map(String) : []);
   for (const capability of REQUIRED_POLICY_CAPABILITIES) allowed.add(capability);
-  allowed.delete("process.execute");
+  for (const capability of DIRECT_PROCESS_CAPABILITIES) allowed.delete(capability);
   config.policy.allowedCapabilities = [...allowed];
   if (Array.isArray(config.policy.scopedCapabilities)) {
     config.policy.scopedCapabilities = config.policy.scopedCapabilities.filter((grant: any) => (
@@ -89,37 +87,6 @@ export async function prepareOdinnBenchmarkState(stateDirectory: string) {
   if (config.runtime && typeof config.runtime === "object") {
     delete config.runtime.allowUnconfinedProcessExec;
   }
-  const sandbox = config.sandbox && typeof config.sandbox === "object" && !Array.isArray(config.sandbox)
-    ? config.sandbox
-    : {};
-  const backend = sandbox.backend && typeof sandbox.backend === "object" && !Array.isArray(sandbox.backend)
-    ? sandbox.backend
-    : {};
-  const processConfig = sandbox.process && typeof sandbox.process === "object" && !Array.isArray(sandbox.process)
-    ? sandbox.process
-    : {};
-  const limits = processConfig.limits && typeof processConfig.limits === "object" && !Array.isArray(processConfig.limits)
-    ? processConfig.limits
-    : {};
-  config.sandbox = {
-    ...sandbox,
-    backend: { ...backend, mode: "oci", preference: ["oci"], unavailable: "refuse" },
-    process: {
-      ...processConfig,
-      enabled: true,
-      shell: false,
-      image: PROCESS_IMAGE,
-      limits: {
-        ...limits,
-        timeoutMs: boundedInteger(limits.timeoutMs, 100, 3_600_000, 120_000),
-        cpu: boundedNumber(limits.cpu, 0.1, 64, 2),
-        memoryBytes: boundedInteger(limits.memoryBytes, 64 * 1024 * 1024, 1024 ** 4, 2 * 1024 * 1024 * 1024),
-        pids: boundedInteger(limits.pids, 16, 4096, 256),
-        tmpfsBytes: boundedInteger(limits.tmpfsBytes, 1024 * 1024, 64 * 1024 * 1024 * 1024, 512 * 1024 * 1024),
-        outputBytes: boundedInteger(limits.outputBytes, 1024, 100 * 1024 * 1024, 1_000_000)
-      }
-    }
-  };
   await atomicJson(configPath, config);
 
   const agentDirectory = join(state, "agents", "main");
@@ -140,22 +107,15 @@ export async function prepareOdinnBenchmarkState(stateDirectory: string) {
   return { state, requiredCapabilities: [...REQUIRED_POLICY_CAPABILITIES], identityFiles: Object.keys(IDENTITY_FILES) };
 }
 
-function boundedInteger(value: unknown, minimum: number, maximum: number, fallback: number): number {
-  return Number.isSafeInteger(value) && Number(value) >= minimum && Number(value) <= maximum ? Number(value) : fallback;
-}
-
-function boundedNumber(value: unknown, minimum: number, maximum: number, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value >= minimum && value <= maximum ? value : fallback;
-}
-
 export async function assertOdinnBenchmarkStateReady(stateDirectory: string) {
   const state = resolve(stateDirectory);
   const config = await readJson(join(state, "config.json"), "Odinn config");
   const allowed = new Set(Array.isArray(config?.policy?.allowedCapabilities) ? config.policy.allowedCapabilities.map(String) : []);
   const missingCapabilities = REQUIRED_POLICY_CAPABILITIES.filter((capability) => !allowed.has(capability));
   if (missingCapabilities.length) throw new Error(`Odinn benchmark state lacks required policy capabilities: ${missingCapabilities.join(", ")}`);
-  if (allowed.has("process.execute") || config?.runtime?.allowUnconfinedProcessExec === true) {
-    throw new Error("Odinn benchmark state must not expose canonical process.execute or unconfined process execution");
+  if ([...DIRECT_PROCESS_CAPABILITIES].some((capability) => allowed.has(capability))
+    || config?.runtime?.allowUnconfinedProcessExec === true) {
+    throw new Error("Odinn one-shot benchmark state must not expose direct or unconfined process execution");
   }
   if (Array.isArray(config?.policy?.scopedCapabilities) && config.policy.scopedCapabilities.some((grant: any) => (
     grant?.tool === "process.exec"
@@ -172,14 +132,8 @@ export async function assertOdinnBenchmarkStateReady(stateDirectory: string) {
   }
 
   const manifest = await readJson(join(agentDirectory, "agent.json"), "Odinn benchmark agent manifest");
-  if (Array.isArray(manifest.tools) && manifest.tools.some((tool: unknown) => tool === "process.execute")) {
-    throw new Error("Odinn benchmark agent manifest must not expose canonical process.execute");
-  }
-  if (config?.sandbox?.process?.enabled !== true
-    || config.sandbox.process.shell !== false
-    || config.sandbox.process.image !== PROCESS_IMAGE
-    || config?.sandbox?.backend?.mode !== "oci") {
-    throw new Error("Odinn benchmark state must expose the sanctioned digest-pinned OCI process sandbox");
+  if (Array.isArray(manifest.tools) && manifest.tools.some((tool: unknown) => DIRECT_PROCESS_CAPABILITIES.has(String(tool)))) {
+    throw new Error("Odinn one-shot benchmark agent manifest must not expose direct process execution");
   }
   const { integrity, ...unsigned } = manifest;
   const expectedIntegrity = createHash("sha256").update(stableJson(unsigned)).digest("hex");
