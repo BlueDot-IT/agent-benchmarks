@@ -15,7 +15,6 @@
         "text.generate",
         "workspace.read",
         "workspace.write",
-        "process.exec",
         "memory.read",
         "memory.write",
         "web.read",
@@ -29,8 +28,6 @@
         "agent.run",
         "--input-file",
         "{inputFile}",
-        "--durable-process",
-        "--confirm-process",
         "--state",
         "{state}"
       ],

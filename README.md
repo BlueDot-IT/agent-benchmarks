@@ -88,19 +88,18 @@ prepare its isolated benchmark agent before running any suite:
 pnpm prepare:odinn-state -- --state benchmarks/state/odinn
 ```
 
-This adds the governed workspace read/mutation capabilities, installs a
-deterministic completed benchmark identity, and configures the digest-pinned
-Linux OCI process sandbox. The maintained CLI adapter advertises `process.exec`
-and passes `--durable-process --confirm-process`; the confirmation is explicit
-local operator authorization, while commands still run in a denied-network,
-read-only container and workspace changes use governed mutations. Process-dependent cases are therefore executed on Linux
-hosts with Docker/OCI available; they remain unsupported when the adapter does
-not declare the capability. The harness fails closed before model preflight if
-an Odinn adapter advertises write or process capabilities while its fixture is
-missing the required workspace grants, has blank identity files, contains
-`BOOTSTRAP.md`, or has an invalid agent manifest/registry. The preparation
-command preserves provider configuration and protected credentials already in
-the state directory; it never creates or prints them.
+This adds the governed workspace read/mutation capabilities and installs a
+deterministic completed benchmark identity. Odinn Forge v1.1.1 authorizes
+`process.exec` only as a separately approved top-level durable `/jobs` task;
+the maintained one-shot `agent.run` adapter cannot safely compose that surface.
+It therefore declares four of the seven comprehensive cases and reports the
+three process-dependent cases as unsupported instead of passing nonexistent
+process flags or weakening Odinn's product policy. The harness fails closed
+before model preflight if an Odinn adapter advertises write capabilities while
+its fixture is missing the required workspace grants, has blank identity files,
+contains `BOOTSTRAP.md`, or has an invalid agent manifest/registry. The
+preparation command preserves provider configuration and protected credentials
+already in the state directory; it never creates or prints them.
 
 Odinn's benchmark write cases use the governed `workspace.mutate` and
 `workspace.patch` tools inside the disposable trial workspace. This keeps the
