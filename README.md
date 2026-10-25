@@ -23,7 +23,7 @@ proof that work succeeded.
 
 ## Requirements
 
-- Node.js 24 or newer
+- Node.js 24.22.1+ (24.x), or 26.12.1+; older runtimes include a vulnerable Brotli decoder
 - pnpm 10.14.0
 - Each agent runtime installed separately or addressed by an explicit command
   in the adapter configuration
